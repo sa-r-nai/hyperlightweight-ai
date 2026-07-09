@@ -1,0 +1,7 @@
+# Ignore all checkpoint directories by default.
+checkpoints_*/
+
+# Keep 5m checkpoints tracked.
+!checkpoints_5m_*/
+!checkpoints_5m_*/best.pt
+!checkpoints_5m_*/last.pt

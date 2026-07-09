@@ -1,0 +1,9 @@
+Place real training text files in this folder.
+
+Supported formats:
+- .txt
+- .md
+- .jsonl with a top-level "text" field on each line
+
+Example command:
+python train_ultralight.py --data ./data --require-real-data --preset 5m --seq-len 64 --batch-size 16 --epochs 1 --optimizer adamw --lr 0.003 --warmup-steps 0 --save-dir ./checkpoints_5m_real
