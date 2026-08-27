@@ -1,8 +1,9 @@
 """Ultra-light decoder-only language model skeleton.
 
-The flow matches:
-input -> preprocessing -> tokenization -> LM forward / next-token sampling
--> stop-condition check -> append token -> repeat -> response output.
+The inference flow matches:
+input -> preprocessing -> tokenization -> LM forward / next-token distribution
+-> decoding / sampling -> append token -> stop-condition check -> repeat
+-> response output.
 
 This module is intentionally self-contained:
 - byte-level tokenizer for multilingual text
@@ -393,6 +394,11 @@ class TinyCausalLM(nn.Module):
     ) -> torch.Tensor:
         self.eval()
         generated = input_ids
+        finished = torch.zeros(
+            input_ids.size(0),
+            dtype=torch.bool,
+            device=input_ids.device,
+        )
 
         for _ in range(max_new_tokens):
             context = generated[:, -self.config.max_seq_len :]
@@ -404,8 +410,17 @@ class TinyCausalLM(nn.Module):
                 top_k=top_k,
                 top_p=top_p,
             )
+            # A batch item that emitted EOS must not resume generating while
+            # the other batch items continue. Repeated EOS ids are ignored by
+            # the decoder and keep every output tensor the same length.
+            next_token = torch.where(
+                finished,
+                torch.full_like(next_token, eos_token_id),
+                next_token,
+            )
             generated = torch.cat([generated, next_token.unsqueeze(-1)], dim=-1)
-            if torch.all(next_token == eos_token_id):
+            finished |= next_token.eq(eos_token_id)
+            if torch.all(finished):
                 break
         return generated
 
@@ -443,10 +458,13 @@ def sample_next_token(
     if top_p is not None and 0.0 < top_p < 1.0:
         sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
         cumulative = torch.cumsum(sorted_probs, dim=-1)
-        keep = cumulative <= top_p
-        keep[..., 0] = True
+        remove = cumulative > top_p
+        # Keep the first token that crosses the probability threshold; this
+        # is the boundary token that completes the nucleus.
+        remove[..., 1:] = remove[..., :-1].clone()
+        remove[..., 0] = False
 
-        filtered = torch.where(keep, sorted_probs, torch.zeros_like(sorted_probs))
+        filtered = sorted_probs.masked_fill(remove, 0.0)
         filtered = filtered / filtered.sum(dim=-1, keepdim=True).clamp_min(1e-8)
         sampled = torch.multinomial(filtered, num_samples=1)
         return sorted_indices.gather(-1, sampled).squeeze(-1)

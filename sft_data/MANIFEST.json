@@ -1,0 +1,38 @@
+{
+  "format": "messages-jsonl",
+  "random_seed": 42,
+  "validation_ratio": 0.02,
+  "record_counts": {
+    "combined_before_deduplication": 7112,
+    "unique": 6925,
+    "train": 6787,
+    "validation": 138
+  },
+  "sources": [
+    {
+      "name": "self-authored Korean conversation seed",
+      "path": "data\\korean_conversation_sft_seed.jsonl",
+      "sha256": "92013be51df88777681bdc7b3ac0fa900a9ba81911b2b5f8b691272636a3aa39",
+      "records": 72
+    },
+    {
+      "name": "CarrotAI/ko-instruction-dataset",
+      "path": "sft_data\\external\\CarrotAI-ko-instruction-dataset\\instruction_korean.json",
+      "url": "https://huggingface.co/datasets/CarrotAI/ko-instruction-dataset",
+      "declared_license": "Apache-2.0",
+      "sha256": "d9c5f5277cd1ee15d847f8ad53cb762a99fbde2d767be25f2c24cf865d62a5e6",
+      "records": 7040
+    }
+  ],
+  "outputs": [
+    {
+      "path": "sft_data\\qwen3_korean_sft_train.jsonl",
+      "sha256": "5bd4dfad25f3eb6bb258f0993fff72b872e761a434eda93f69d6429abee1e161"
+    },
+    {
+      "path": "sft_data\\qwen3_korean_sft_validation.jsonl",
+      "sha256": "eebf62b6d0ff1935ad85048f2ab53274480380f892e1febffec03b139b020bea"
+    }
+  ],
+  "checkpoint_relationship": "These records are supplemental SFT data and were not used to create the official Qwen3-0.6B checkpoint stored by this project."
+}
