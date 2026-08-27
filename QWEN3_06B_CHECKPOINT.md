@@ -1,4 +1,7 @@
-# CPU conversational checkpoint
+# Optional llama.cpp/GGUF checkpoint
+
+This is an optional alternative runtime. The project's primary path is now the
+Python/PyTorch implementation documented in `QWEN3_06B_PYTHON.md`.
 
 This project uses the official `Qwen/Qwen3-0.6B-GGUF` Q8_0 checkpoint for
 usable CPU-only conversation. It is separate from the custom `TinyCausalLM`
