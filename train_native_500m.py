@@ -110,6 +110,18 @@ def _read_json_record(path: Path, line: str) -> TrainingRecord | None:
     except json.JSONDecodeError:
         return None
     if isinstance(record, dict):
+        instruction = record.get("instruction")
+        output = record.get("output")
+        if (
+            isinstance(instruction, str)
+            and instruction.strip()
+            and isinstance(output, str)
+            and output.strip()
+        ):
+            return [
+                {"role": "user", "content": instruction.strip()},
+                {"role": "assistant", "content": output.strip()},
+            ]
         for key in ("text", "content", "prompt", "completion"):
             value = record.get(key)
             if isinstance(value, str) and value.strip():
@@ -133,7 +145,7 @@ def _read_json_record(path: Path, line: str) -> TrainingRecord | None:
 
 def iter_documents(data_path: Path) -> Iterator[TrainingRecord]:
     paths = [data_path] if data_path.is_file() else sorted(data_path.rglob("*"))
-    supported = {".txt", ".md", ".jsonl"}
+    supported = {".txt", ".md", ".json", ".jsonl"}
     for path in paths:
         if not path.is_file() or path.suffix.lower() not in supported:
             continue
@@ -143,6 +155,19 @@ def iter_documents(data_path: Path) -> Iterator[TrainingRecord]:
             text = path.read_text(encoding="utf-8", errors="replace").strip()
             if text:
                 yield text
+            continue
+        if path.suffix.lower() == ".json":
+            raw_records = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            if isinstance(raw_records, dict):
+                raw_records = [raw_records]
+            if isinstance(raw_records, list):
+                for raw_record in raw_records:
+                    if isinstance(raw_record, dict):
+                        if record := _read_json_record(
+                            path,
+                            json.dumps(raw_record, ensure_ascii=False),
+                        ):
+                            yield record
             continue
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
