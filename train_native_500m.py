@@ -132,9 +132,15 @@ def _read_json_record(path: Path, line: str) -> TrainingRecord | None:
             for message in messages:
                 if not isinstance(message, dict):
                     continue
-                role = message.get("role", "unknown")
+                role = {
+                    "human": "user",
+                    "user": "user",
+                    "gpt": "assistant",
+                    "assistant": "assistant",
+                    "system": "system",
+                }.get(str(message.get("role", "unknown")))
                 content = message.get("content")
-                if isinstance(content, str) and content.strip():
+                if role and isinstance(content, str) and content.strip():
                     normalized_messages.append(
                         {"role": str(role), "content": content.strip()}
                     )
@@ -190,9 +196,15 @@ class PackedTextDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         for document in documents:
             if isinstance(document, str):
                 tokens.extend(tokenizer.encode(document))
+                tokens.append(tokenizer.eos_token_id)
             else:
-                tokens.extend(tokenizer.encode_chat(document))
-            tokens.append(tokenizer.eos_token_id)
+                tokens.extend(
+                    tokenizer.encode_chat(
+                        document,
+                        add_bos=False,
+                        add_eos=True,
+                    )
+                )
         if len(tokens) < seq_len + 1:
             raise ValueError(
                 f"학습 토큰이 부족합니다. 최소 {seq_len + 1}개가 필요하고 "
