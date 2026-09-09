@@ -1,0 +1,100 @@
+"""Interactive runner for a NativeByteLM checkpoint."""
+
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import torch
+
+from native_500m import load_checkpoint
+from native_tokenizer import NativeTokenizer
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="NativeByteLM 대화 실행기")
+    parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
+    parser.add_argument("--message", type=str)
+    parser.add_argument(
+        "--system",
+        default="정확하고 간결하게 답하는 한국어·다국어 도우미입니다.",
+    )
+    parser.add_argument("--max-new-tokens", type=int, default=256)
+    parser.add_argument("--temperature", type=float, default=0.8)
+    parser.add_argument("--top-k", type=int, default=50)
+    parser.add_argument("--top-p", type=float, default=0.9)
+    parser.add_argument("--repetition-penalty", type=float, default=1.05)
+    return parser.parse_args()
+
+
+def resolve_device(name: str) -> torch.device:
+    if name == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA를 사용할 수 없습니다. CPU 실행은 --device cpu를 명시해 주세요."
+            )
+        return torch.device("cuda")
+    return torch.device("cpu")
+
+
+def generate_reply(
+    model,
+    tokenizer: NativeTokenizer,
+    messages: list[dict[str, str]],
+    device: torch.device,
+    args: argparse.Namespace,
+) -> str:
+    prompt = tokenizer.encode_generation_prompt(messages)
+    input_ids = torch.tensor([prompt], dtype=torch.long, device=device)
+    output_ids = model.generate(
+        input_ids,
+        max_new_tokens=args.max_new_tokens,
+        temperature=args.temperature,
+        top_k=args.top_k,
+        top_p=args.top_p,
+        repetition_penalty=args.repetition_penalty,
+    )[0]
+    new_tokens = output_ids[len(prompt) :].tolist()
+    return tokenizer.decode(new_tokens).strip()
+
+
+def main() -> None:
+    args = parse_args()
+    device = resolve_device(args.device)
+    model, _ = load_checkpoint(args.checkpoint, map_location=device)
+    model.to(device)
+    model.eval()
+    tokenizer = NativeTokenizer()
+    messages = [{"role": "system", "content": args.system}]
+
+    if args.message:
+        messages.append({"role": "user", "content": args.message})
+        print(generate_reply(model, tokenizer, messages, device, args))
+        return
+
+    print("[정보] 대화를 시작합니다. 종료하려면 /exit를 입력해 주세요.")
+    while True:
+        try:
+            user_text = input("사용자> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not user_text:
+            continue
+        if user_text == "/exit":
+            break
+        messages.append({"role": "user", "content": user_text})
+        answer = generate_reply(model, tokenizer, messages, device, args)
+        print(f"모델> {answer}")
+        messages.append({"role": "assistant", "content": answer})
+        # Byte-level context grows quickly, so keep the newest conversation
+        # turns while always preserving the system instruction.
+        while len(tokenizer.encode_generation_prompt(messages)) > model.config.max_seq_len:
+            if len(messages) <= 3:
+                break
+            del messages[1:3]
+
+
+if __name__ == "__main__":
+    main()

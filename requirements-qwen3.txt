@@ -1,3 +1,0 @@
-# Install the appropriate CUDA-enabled PyTorch build separately.
-transformers>=4.51.0,<6
-safetensors>=0.4.5

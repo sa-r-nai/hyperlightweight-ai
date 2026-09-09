@@ -1,7 +1,11 @@
-# Ignore all checkpoint directories by default.
+# Existing small-model experiments
 checkpoints_*/
-
-# Keep 5m checkpoints tracked.
 !checkpoints_5m_*/
 !checkpoints_5m_*/best.pt
 !checkpoints_5m_*/last.pt
+
+# New model outputs are generated locally and are not source files.
+checkpoints_native_500m/
+artifacts_native_500m/
+__pycache__/
+*.py[cod]

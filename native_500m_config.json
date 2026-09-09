@@ -1,0 +1,16 @@
+{
+  "format": "nativebytelm-config-v1",
+  "config": {
+    "vocab_size": 264,
+    "max_seq_len": 2048,
+    "d_model": 1280,
+    "n_layers": 24,
+    "n_heads": 20,
+    "d_ff": 5504,
+    "dropout": 0.0,
+    "tie_embeddings": true,
+    "use_bias": false,
+    "init_std": 0.02
+  },
+  "estimated_parameter_count": 498536960
+}
