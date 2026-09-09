@@ -63,7 +63,13 @@ def main() -> None:
     args = parse_args()
     device = resolve_device(args.device)
     model, _ = load_checkpoint(args.checkpoint, map_location=device)
-    model.to(device)
+    if device.type == "cuda":
+        inference_dtype = (
+            torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        )
+        model.to(device=device, dtype=inference_dtype)
+    else:
+        model.to(device)
     model.eval()
     tokenizer = NativeTokenizer()
     messages = [{"role": "system", "content": args.system}]
