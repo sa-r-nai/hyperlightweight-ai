@@ -1,10 +1,4 @@
-# Existing small-model experiments
-checkpoints_*/
-!checkpoints_5m_*/
-!checkpoints_5m_*/best.pt
-!checkpoints_5m_*/last.pt
-
-# New model outputs are generated locally and are not source files.
+# NativeByteLM-500M outputs are generated locally and are not source files.
 checkpoints_native_500m/
 artifacts_native_500m/
 __pycache__/
