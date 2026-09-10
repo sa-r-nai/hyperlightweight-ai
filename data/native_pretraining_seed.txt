@@ -1,39 +1,31 @@
-# 계획 세우기
+# Planning
 
-좋은 계획은 목표, 완료 조건, 순서, 점검 시점을 분리해서 적습니다. 목표만 크고 완료 조건이 없으면 작업이 끝났는지 판단하기 어렵습니다. 처음에는 가장 작은 검증 가능한 결과를 정하고, 결과를 확인한 뒤 다음 단계를 추가하는 편이 안전합니다.
+A useful plan separates the goal, completion criteria, sequence, and review points. Start with the smallest verifiable result, check it, and then add the next step.
 
-# 디버깅
+# Debugging
 
-디버깅은 추측을 늘리는 일이 아니라 관찰 가능한 차이를 좁히는 과정입니다. 재현 절차를 고정하고 입력과 기대 결과를 기록한 다음, 가장 작은 예제로 줄여야 합니다. 첫 번째로 기대와 달라지는 중간값을 찾으면 원인 후보를 빠르게 줄일 수 있습니다.
+Debugging narrows observable differences. Fix the reproduction steps, record the expected and actual results, reduce the case, and inspect the first intermediate value that differs.
 
-# 데이터 품질
+# Data quality
 
-학습 데이터는 양만으로 평가할 수 없습니다. 중복, 깨진 인코딩, 서로 모순되는 답, 출처와 라이선스가 불명확한 문장을 분리해야 합니다. 데이터의 출처와 전처리 규칙을 함께 기록하면 나중에 문제가 발생했을 때 원인을 추적할 수 있습니다.
+Training data should be checked for duplicates, broken encoding, contradictions, unclear provenance, and license restrictions. Record every transformation so problems remain traceable.
 
-# 소프트웨어 테스트
+# Testing
 
-테스트는 구현 세부사항보다 외부에서 관찰되는 약속을 확인해야 합니다. 작은 단위 테스트는 빠른 피드백을 주고, 통합 테스트는 여러 구성요소의 연결 문제를 찾습니다. 두 종류를 함께 두면 변경 속도와 신뢰성을 동시에 유지할 수 있습니다.
+Unit tests provide fast feedback about small behaviors. Integration tests reveal failures between components. Both are needed to change software quickly without losing confidence.
 
-# 네트워크
+# Networks
 
-네트워크 문제를 확인할 때는 물리 연결, 주소 설정, 이름 해석, 전송 경로, 애플리케이션 응답 순서로 범위를 넓히는 것이 좋습니다. 한 번에 여러 설정을 바꾸면 무엇이 문제를 해결했는지 알 수 없으므로 한 번에 한 가지 가설만 검증해야 합니다.
+Investigate network problems from physical connectivity through addressing, name resolution, routing, and application responses. Change one variable at a time so each result is meaningful.
 
-# 학습 방법
+# Learning
 
-새로운 개념은 읽기만 할 때보다 직접 설명하거나 작은 예제를 만들 때 오래 기억됩니다. 짧게 공부한 뒤 빈 종이에 핵심을 재구성하고, 막힌 부분만 다시 확인하는 회상 연습이 효율적입니다.
+Active recall is more effective than repeated reading. Study briefly, reconstruct the main ideas without notes, and revisit difficult material after increasing intervals.
 
-# 한국어 글쓰기
+# Writing
 
-한국어 기술 문서는 결론을 먼저 쓰고, 그 결론을 뒷받침하는 조건과 예외를 뒤에 배치하면 읽기 쉽습니다. 한 문장에 너무 많은 원인을 넣지 말고, 용어를 처음 사용할 때 짧게 정의하는 것이 좋습니다.
+Clear technical writing states the decision first and then gives evidence, constraints, and exceptions. Short paragraphs and reproducible examples make review easier.
 
-# English writing
+# Language models
 
-Clear technical writing states the decision first, then explains the evidence and the limits. Short paragraphs, explicit assumptions, and reproducible examples make a document easier to review.
-
-# Unicode text
-
-Unicode gives text systems a common representation for many writing systems. UTF-8 represents a text stream with one to four bytes per code point, so a byte-level tokenizer can preserve unseen characters without a language-specific vocabulary file.
-
-# 모델 학습
-
-언어 모델의 사전 학습은 앞의 토큰으로 다음 토큰을 예측하도록 가중치를 조정하는 과정입니다. 검증 손실은 학습에 직접 사용하지 않은 데이터를 얼마나 잘 예측하는지 확인하는 지표입니다. 검증 손실이 계속 오르면 데이터 순서, 학습률, 과적합 여부를 점검해야 합니다.
+A causal language model learns to predict the next token from previous tokens. Training loss measures fit to training examples, while validation loss estimates performance on unseen data.

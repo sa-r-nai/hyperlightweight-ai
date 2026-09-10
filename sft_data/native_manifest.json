@@ -10,19 +10,19 @@
   },
   "sources": [
     {
-      "path": "data/native_sft_seed.jsonl",
-      "sha256": "013c48eaf0e970074dc454fce2511a3ea7fbfb0714589a1293f3d8254e87233c",
+      "path": "data\\native_sft_seed.jsonl",
+      "sha256": "fa3acc1646e11f7c1c20b687ff9dd897bbabaf92bda7ca5142f77b26d7443cf4",
       "license": "self-authored"
     }
   ],
   "outputs": [
     {
-      "path": "sft_data/native_sft_train.jsonl",
-      "sha256": "c15d6a041911652a001412910fd4c4e79072f833f782509e52639a3f12ac6b32"
+      "path": "sft_data\\native_sft_train.jsonl",
+      "sha256": "2f006cbf64fd074a1800956b7a5fd627bdfb229e569a9e12790823ad95480cd8"
     },
     {
-      "path": "sft_data/native_sft_validation.jsonl",
-      "sha256": "6613ddce505ab01f6c9cc44da83c98b65e1bb118482bae998b72bf231eefa003"
+      "path": "sft_data\\native_sft_validation.jsonl",
+      "sha256": "d0fee3a05b7ca060a92baa4d2639d68dd04c857f9b6a4ac23926f34302ee3332"
     }
   ],
   "model_relationship": "These records are independent training material. No pretrained model weights or external model tokenizer are included."

@@ -316,6 +316,7 @@ class NativeCausalLM(nn.Module):
         top_p: Optional[float] = 0.9,
         repetition_penalty: float = 1.05,
         eos_token_id: int = NativeTokenizer.eos_token_id,
+        ascii_only: bool = False,
     ) -> torch.Tensor:
         """Generate tokens with the same explicit sampling stages as training."""
 
@@ -339,6 +340,19 @@ class NativeCausalLM(nn.Module):
         for _ in range(max_new_tokens):
             context = generated[:, -self.config.max_seq_len :]
             logits = self(context)[:, -1, :]
+
+            if ascii_only:
+                # Keep English generation valid by allowing only EOS,
+                # printable ASCII, tab, and newline.
+                allowed = torch.zeros_like(logits, dtype=torch.bool)
+                allowed[:, eos_token_id] = True
+                allowed_bytes = [9, 10] + list(range(32, 127))
+                allowed_ids = torch.tensor(
+                    [NativeTokenizer.byte_offset + value for value in allowed_bytes],
+                    device=logits.device,
+                )
+                allowed[:, allowed_ids] = True
+                logits = logits.masked_fill(~allowed, float("-inf"))
 
             if repetition_penalty != 1.0:
                 for batch_index in range(generated.size(0)):

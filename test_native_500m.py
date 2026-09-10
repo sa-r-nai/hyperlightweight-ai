@@ -73,6 +73,21 @@ class NativeModelTests(unittest.TestCase):
         )
         self.assertEqual(tuple(result.shape), (2, 11))
 
+    def test_ascii_only_generation_emits_safe_english_bytes(self) -> None:
+        torch.manual_seed(17)
+        model = NativeCausalLM(SMOKE_CONFIG)
+        prompt = torch.tensor([[1, 5, 8 + ord("H"), 8 + ord("i"), 6]])
+        result = model.generate(
+            prompt,
+            max_new_tokens=8,
+            temperature=0.0,
+            top_k=None,
+            top_p=None,
+            ascii_only=True,
+        )
+        allowed = {2, 8 + 9, 8 + 10, *(8 + value for value in range(32, 127))}
+        self.assertTrue(set(result[0, prompt.size(1) :].tolist()) <= allowed)
+
 
 if __name__ == "__main__":
     unittest.main()

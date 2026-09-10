@@ -1,10 +1,10 @@
 """Self-contained UTF-8 byte tokenizer for NativeByteLM.
 
 The tokenizer deliberately has no dependency on a pretrained vocabulary or a
-third-party chat template.  Every non-special token is one byte from the
-UTF-8 representation of the normalized input.  This makes the model able to
-round-trip Korean, emoji, source code, and arbitrary Unicode text without an
-external vocabulary file.
+third-party chat template. Every non-special token is one byte from the UTF-8
+representation of the normalized input. The tokenizer can still round-trip
+arbitrary Unicode input, while the English chat runner constrains generated
+output to safe ASCII bytes by default.
 """
 
 from __future__ import annotations

@@ -12,19 +12,27 @@ from native_tokenizer import NativeTokenizer
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="NativeByteLM 대화 실행기")
+    parser = argparse.ArgumentParser(description="NativeByteLM English chat runner")
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument("--message", type=str)
     parser.add_argument(
         "--system",
-        default="정확하고 간결하게 답하는 한국어·다국어 도우미입니다.",
+        default=(
+            "You are a helpful English assistant. Answer accurately, clearly, "
+            "and concisely. Say when you do not know something."
+        ),
     )
     parser.add_argument("--max-new-tokens", type=int, default=256)
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--repetition-penalty", type=float, default=1.05)
+    parser.add_argument(
+        "--allow-unicode",
+        action="store_true",
+        help="Allow arbitrary UTF-8 bytes instead of English-safe ASCII output.",
+    )
     return parser.parse_args()
 
 
@@ -54,6 +62,7 @@ def generate_reply(
         top_k=args.top_k,
         top_p=args.top_p,
         repetition_penalty=args.repetition_penalty,
+        ascii_only=not args.allow_unicode,
     )[0]
     new_tokens = output_ids[len(prompt) :].tolist()
     return tokenizer.decode(new_tokens).strip()
@@ -79,10 +88,10 @@ def main() -> None:
         print(generate_reply(model, tokenizer, messages, device, args))
         return
 
-    print("[정보] 대화를 시작합니다. 종료하려면 /exit를 입력해 주세요.")
+    print("[info] Chat started. Type /exit to quit.")
     while True:
         try:
-            user_text = input("사용자> ").strip()
+            user_text = input("user> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -92,7 +101,7 @@ def main() -> None:
             break
         messages.append({"role": "user", "content": user_text})
         answer = generate_reply(model, tokenizer, messages, device, args)
-        print(f"모델> {answer}")
+        print(f"assistant> {answer}")
         messages.append({"role": "assistant", "content": answer})
         # Byte-level context grows quickly, so keep the newest conversation
         # turns while always preserving the system instruction.
