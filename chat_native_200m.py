@@ -1,4 +1,4 @@
-"""Interactive runner for a NativeByteLM checkpoint."""
+"""Interactive runner for a NativeEnglishLM checkpoint."""
 
 from __future__ import annotations
 
@@ -7,13 +7,18 @@ from pathlib import Path
 
 import torch
 
-from native_500m import load_checkpoint
+from native_200m import load_checkpoint
 from native_tokenizer import NativeTokenizer
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="NativeByteLM English chat runner")
+    parser = argparse.ArgumentParser(description="NativeEnglishLM chat runner")
     parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--tokenizer",
+        type=Path,
+        default=Path("tokenizer/native_english_bpe.json"),
+    )
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument("--message", type=str)
     parser.add_argument(
@@ -28,20 +33,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-k", type=int, default=50)
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--repetition-penalty", type=float, default=1.05)
-    parser.add_argument(
-        "--allow-unicode",
-        action="store_true",
-        help="Allow arbitrary UTF-8 bytes instead of English-safe ASCII output.",
-    )
     return parser.parse_args()
 
 
 def resolve_device(name: str) -> torch.device:
     if name == "cuda":
         if not torch.cuda.is_available():
-            raise RuntimeError(
-                "CUDA를 사용할 수 없습니다. CPU 실행은 --device cpu를 명시해 주세요."
-            )
+            raise RuntimeError("CUDA is unavailable. Pass --device cpu to run on the CPU.")
         return torch.device("cuda")
     return torch.device("cpu")
 
@@ -62,7 +60,7 @@ def generate_reply(
         top_k=args.top_k,
         top_p=args.top_p,
         repetition_penalty=args.repetition_penalty,
-        ascii_only=not args.allow_unicode,
+        allowed_token_ids=tokenizer.english_output_token_ids(),
     )[0]
     new_tokens = output_ids[len(prompt) :].tolist()
     return tokenizer.decode(new_tokens).strip()
@@ -71,7 +69,7 @@ def generate_reply(
 def main() -> None:
     args = parse_args()
     device = resolve_device(args.device)
-    model, _ = load_checkpoint(args.checkpoint, map_location=device)
+    model, checkpoint = load_checkpoint(args.checkpoint, map_location=device)
     if device.type == "cuda":
         inference_dtype = (
             torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
@@ -80,7 +78,12 @@ def main() -> None:
     else:
         model.to(device)
     model.eval()
-    tokenizer = NativeTokenizer()
+    tokenizer = NativeTokenizer.load(args.tokenizer)
+    if tokenizer.vocab_size != model.config.vocab_size:
+        raise ValueError("The checkpoint and tokenizer vocabulary sizes do not match.")
+    saved_fingerprint = checkpoint.get("tokenizer_fingerprint")
+    if saved_fingerprint and saved_fingerprint != tokenizer.fingerprint():
+        raise ValueError("The checkpoint was created with a different tokenizer.")
     messages = [{"role": "system", "content": args.system}]
 
     if args.message:
@@ -103,8 +106,7 @@ def main() -> None:
         answer = generate_reply(model, tokenizer, messages, device, args)
         print(f"assistant> {answer}")
         messages.append({"role": "assistant", "content": answer})
-        # Byte-level context grows quickly, so keep the newest conversation
-        # turns while always preserving the system instruction.
+        # Keep the newest turns while always preserving the system instruction.
         while len(tokenizer.encode_generation_prompt(messages)) > model.config.max_seq_len:
             if len(messages) <= 3:
                 break

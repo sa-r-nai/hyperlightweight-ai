@@ -4,22 +4,29 @@ import unittest
 
 import torch
 
-from native_500m import Native500MConfig, NativeCausalLM, SMOKE_CONFIG, estimate_parameter_count
+from native_200m import Native200MConfig, NativeCausalLM, SMOKE_CONFIG, estimate_parameter_count
 from native_tokenizer import NativeTokenizer
+from train_native_tokenizer import train_bpe
 
 
 class NativeTokenizerTests(unittest.TestCase):
-    def test_unicode_round_trip(self) -> None:
-        tokenizer = NativeTokenizer()
-        text = "안녕하세요, NativeByteLM! 🎵\n다음 줄입니다."
+    def test_english_round_trip_and_bpe_compression(self) -> None:
+        text = "English language models should tokenize repeated English words."
+        tokenizer = train_bpe([text] * 20, target_vocab_size=256, min_frequency=2)
         token_ids = tokenizer.encode(text, normalize=False)
         self.assertEqual(tokenizer.decode(token_ids), text)
+        self.assertLess(len(token_ids), len(text.encode("ascii")))
+
+    def test_non_ascii_input_is_rejected(self) -> None:
+        tokenizer = NativeTokenizer()
+        with self.assertRaises(ValueError):
+            tokenizer.encode("Non-ASCII input: \u00e9")
 
     def test_chat_protocol_has_no_external_template(self) -> None:
         tokenizer = NativeTokenizer()
         messages = [
-            {"role": "system", "content": "규칙"},
-            {"role": "user", "content": "질문"},
+            {"role": "system", "content": "Answer in English."},
+            {"role": "user", "content": "What is a cache?"},
         ]
         prompt = tokenizer.encode_generation_prompt(messages)
         self.assertEqual(prompt[0], tokenizer.bos_token_id)
@@ -29,11 +36,10 @@ class NativeTokenizerTests(unittest.TestCase):
 
 
 class NativeModelTests(unittest.TestCase):
-    def test_default_configuration_is_near_500m(self) -> None:
-        config = Native500MConfig()
-        count = estimate_parameter_count(config)
-        self.assertGreater(count, 490_000_000)
-        self.assertLess(count, 510_000_000)
+    def test_default_configuration_is_near_200m(self) -> None:
+        count = estimate_parameter_count(Native200MConfig())
+        self.assertGreater(count, 190_000_000)
+        self.assertLess(count, 215_000_000)
 
     def test_causal_forward_and_loss(self) -> None:
         torch.manual_seed(7)
@@ -73,20 +79,24 @@ class NativeModelTests(unittest.TestCase):
         )
         self.assertEqual(tuple(result.shape), (2, 11))
 
-    def test_ascii_only_generation_emits_safe_english_bytes(self) -> None:
+    def test_generation_respects_english_output_tokens(self) -> None:
         torch.manual_seed(17)
+        tokenizer = NativeTokenizer()
         model = NativeCausalLM(SMOKE_CONFIG)
-        prompt = torch.tensor([[1, 5, 8 + ord("H"), 8 + ord("i"), 6]])
+        prompt = torch.tensor(
+            [[1, 5, tokenizer.byte_offset + ord("H"), tokenizer.byte_offset + ord("i"), 6]]
+        )
+        allowed = tokenizer.english_output_token_ids()
         result = model.generate(
             prompt,
             max_new_tokens=8,
             temperature=0.0,
             top_k=None,
             top_p=None,
-            ascii_only=True,
+            allowed_token_ids=allowed,
         )
-        allowed = {2, 8 + 9, 8 + 10, *(8 + value for value in range(32, 127))}
-        self.assertTrue(set(result[0, prompt.size(1) :].tolist()) <= allowed)
+        generated = set(result[0, prompt.size(1) :].tolist())
+        self.assertTrue(generated <= {tokenizer.eos_token_id, *allowed})
 
 
 if __name__ == "__main__":

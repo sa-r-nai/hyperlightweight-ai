@@ -33,19 +33,25 @@ def load_records(paths: Iterable[Path]) -> list[dict]:
 
 def validate_record(record: dict, location: str) -> None:
     if not isinstance(record, dict) or not isinstance(record.get("messages"), list):
-        raise ValueError(f"메시지 배열이 없습니다: {location}")
+        raise ValueError(f"Missing messages array: {location}")
     messages = record["messages"]
     if len(messages) < 3 or messages[0].get("role") != "system":
-        raise ValueError(f"system을 포함한 대화가 아닙니다: {location}")
+        raise ValueError(f"Conversation does not start with a system message: {location}")
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError(f"Empty message content: {location}")
+        try:
+            content.encode("ascii")
+        except UnicodeEncodeError as error:
+            raise ValueError(f"Non-ASCII text in English-only data: {location}") from error
     expected_role = "user"
     for message in messages[1:]:
         if message.get("role") != expected_role:
-            raise ValueError(f"역할이 번갈아 나오지 않습니다: {location}")
-        if not isinstance(message.get("content"), str) or not message["content"].strip():
-            raise ValueError(f"빈 메시지가 있습니다: {location}")
+            raise ValueError(f"Message roles do not alternate: {location}")
         expected_role = "assistant" if expected_role == "user" else "user"
     if messages[-1].get("role") != "assistant":
-        raise ValueError(f"assistant로 끝나지 않습니다: {location}")
+        raise ValueError(f"Conversation does not end with an assistant: {location}")
 
 
 def conversation_key(record: dict) -> tuple[tuple[str, str], ...]:
@@ -57,13 +63,13 @@ def conversation_key(record: dict) -> tuple[tuple[str, str], ...]:
 
 def write_jsonl(path: Path, records: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8", newline="\n") as handle:
+    with path.open("w", encoding="ascii", newline="\n") as handle:
         for record in records:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+            handle.write(json.dumps(record, ensure_ascii=True) + "\n")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="NativeByteLM SFT 데이터 준비")
+    parser = argparse.ArgumentParser(description="Validate and split English SFT data.")
     parser.add_argument(
         "--input",
         type=Path,
@@ -75,14 +81,14 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
     if not 0.0 < args.validation_ratio < 1.0:
-        raise ValueError("validation-ratio는 0과 1 사이여야 합니다.")
+        raise ValueError("validation-ratio must be between zero and one.")
 
     input_paths = list(
         dict.fromkeys(args.input or [Path("data/native_sft_seed.jsonl")])
     )
     missing = [path for path in input_paths if not path.exists()]
     if missing:
-        raise FileNotFoundError("입력 파일이 없습니다: " + ", ".join(map(str, missing)))
+        raise FileNotFoundError("Missing input files: " + ", ".join(map(str, missing)))
 
     source_records = load_records(input_paths)
     unique_records: list[dict] = []
@@ -103,7 +109,7 @@ def main() -> None:
     write_jsonl(validation_path, validation_records)
 
     manifest = {
-        "format": "nativebytelm-messages-jsonl-v1",
+        "format": "native-english-messages-jsonl-v1",
         "random_seed": args.seed,
         "validation_ratio": args.validation_ratio,
         "record_counts": {
@@ -131,13 +137,13 @@ def main() -> None:
     }
     manifest_path = args.output_dir / "native_manifest.json"
     manifest_path.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
+        json.dumps(manifest, ensure_ascii=True, indent=2) + "\n",
+        encoding="ascii",
     )
-    print(f"[정보] 중복 제거 후 {len(unique_records)}건을 준비했습니다.")
-    print(f"[정보] 학습 데이터: {train_path}")
-    print(f"[정보] 검증 데이터: {validation_path}")
-    print(f"[정보] 출처 매니페스트: {manifest_path}")
+    print(f"[info] Prepared {len(unique_records)} unique records.")
+    print(f"[info] Training data: {train_path}")
+    print(f"[info] Validation data: {validation_path}")
+    print(f"[info] Provenance manifest: {manifest_path}")
 
 
 if __name__ == "__main__":

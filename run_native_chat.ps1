@@ -8,9 +8,10 @@ param(
 )
 
 $arguments = @(
-    "chat_native_500m.py",
+    "chat_native_200m.py",
     "--checkpoint", $Checkpoint,
     "--device", $Device,
+    "--tokenizer", "tokenizer/native_english_bpe.json",
     "--max-new-tokens", $MaxNewTokens
 )
 if ($Message) {

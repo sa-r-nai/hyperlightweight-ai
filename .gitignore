@@ -1,5 +1,5 @@
-# NativeByteLM-500M outputs are generated locally and are not source files.
-checkpoints_native_500m/
-artifacts_native_500m/
+# NativeEnglishLM-200M checkpoints are generated locally and are not source files.
+checkpoints_native_200m/
+artifacts_native_200m/
 __pycache__/
 *.py[cod]

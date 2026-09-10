@@ -1,4 +1,4 @@
-"""Train NativeByteLM-500M from random initialization.
+"""Train NativeEnglishLM-200M from random initialization.
 
 The default execution target is CUDA.  CPU training is available only when
 the caller explicitly passes ``--device cpu``; an unavailable GPU never causes
@@ -20,8 +20,8 @@ import torch
 from torch import nn
 from torch.utils.data import DataLoader, Dataset
 
-from native_500m import (
-    Native500MConfig,
+from native_200m import (
+    Native200MConfig,
     NativeCausalLM,
     SMOKE_CONFIG,
     save_checkpoint,
@@ -30,19 +30,22 @@ from native_tokenizer import NativeTokenizer
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="NativeByteLM-500M을 처음부터 학습합니다."
-    )
+    parser = argparse.ArgumentParser(description="Train NativeEnglishLM-200M from scratch.")
     parser.add_argument("--data", type=Path, default=Path("data"))
+    parser.add_argument(
+        "--tokenizer",
+        type=Path,
+        default=Path("tokenizer/native_english_bpe.json"),
+    )
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("checkpoints_native_500m"),
+        default=Path("checkpoints_native_200m"),
     )
     parser.add_argument(
         "--preset",
-        choices=("native-500m", "smoke"),
-        default="native-500m",
+        choices=("native-200m", "smoke"),
+        default="native-200m",
     )
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument("--seq-len", type=int, default=2048)
@@ -79,10 +82,7 @@ def set_seed(seed: int) -> None:
 def resolve_device(name: str) -> torch.device:
     if name == "cuda":
         if not torch.cuda.is_available():
-            raise RuntimeError(
-                "CUDA를 사용할 수 없습니다. CPU 학습을 원하면 --device cpu를 "
-                "명시적으로 사용해 주세요."
-            )
+            raise RuntimeError("CUDA is unavailable. Pass --device cpu to train on the CPU.")
         return torch.device("cuda")
     return torch.device("cpu")
 
@@ -92,7 +92,7 @@ def resolve_amp_dtype(device: torch.device, requested: str) -> torch.dtype | Non
         return None
     if requested == "bf16":
         if not torch.cuda.is_bf16_supported():
-            raise RuntimeError("현재 CUDA 장치가 bfloat16을 지원하지 않습니다.")
+            raise RuntimeError("The current CUDA device does not support bfloat16.")
         return torch.bfloat16
     if requested == "fp16":
         return torch.float16
@@ -158,12 +158,12 @@ def iter_documents(data_path: Path) -> Iterator[TrainingRecord]:
         if path.name.lower() in {"manifest.json", "readme.info"}:
             continue
         if path.suffix.lower() in {".txt", ".md"}:
-            text = path.read_text(encoding="utf-8", errors="replace").strip()
+            text = path.read_text(encoding="ascii", errors="strict").strip()
             if text:
                 yield text
             continue
         if path.suffix.lower() == ".json":
-            raw_records = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+            raw_records = json.loads(path.read_text(encoding="ascii", errors="strict"))
             if isinstance(raw_records, dict):
                 raw_records = [raw_records]
             if isinstance(raw_records, list):
@@ -171,11 +171,11 @@ def iter_documents(data_path: Path) -> Iterator[TrainingRecord]:
                     if isinstance(raw_record, dict):
                         if record := _read_json_record(
                             path,
-                            json.dumps(raw_record, ensure_ascii=False),
+                            json.dumps(raw_record, ensure_ascii=True),
                         ):
                             yield record
             continue
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
+        with path.open("r", encoding="ascii", errors="strict") as handle:
             for line in handle:
                 if record := _read_json_record(path, line):
                     yield record
@@ -191,7 +191,7 @@ class PackedTextDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         seq_len: int,
     ):
         if seq_len < 2:
-            raise ValueError("seq_len은 2 이상이어야 합니다.")
+            raise ValueError("seq_len must be at least two.")
         tokens: list[int] = [tokenizer.bos_token_id]
         for document in documents:
             if isinstance(document, str):
@@ -207,8 +207,8 @@ class PackedTextDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
                 )
         if len(tokens) < seq_len + 1:
             raise ValueError(
-                f"학습 토큰이 부족합니다. 최소 {seq_len + 1}개가 필요하고 "
-                f"현재 {len(tokens)}개입니다."
+                f"The dataset needs at least {seq_len + 1} tokens but contains "
+                f"only {len(tokens)}."
             )
         self.tokens = torch.tensor(tokens, dtype=torch.long)
         self.seq_len = seq_len
@@ -278,11 +278,21 @@ def autocast_context(device: torch.device, amp_dtype: torch.dtype | None):
     )
 
 
-def load_or_create_model(args: argparse.Namespace) -> tuple[NativeCausalLM, int, float | None]:
+def load_or_create_model(
+    args: argparse.Namespace,
+    tokenizer: NativeTokenizer,
+) -> tuple[NativeCausalLM, int, float | None]:
     if args.preset == "smoke":
-        config = replace(SMOKE_CONFIG, max_seq_len=args.seq_len)
+        config = replace(
+            SMOKE_CONFIG,
+            vocab_size=tokenizer.vocab_size,
+            max_seq_len=args.seq_len,
+        )
     else:
-        config = Native500MConfig(max_seq_len=args.seq_len)
+        config = Native200MConfig(
+            vocab_size=tokenizer.vocab_size,
+            max_seq_len=args.seq_len,
+        )
 
     model = NativeCausalLM(config)
     if args.resume is None:
@@ -290,7 +300,13 @@ def load_or_create_model(args: argparse.Namespace) -> tuple[NativeCausalLM, int,
 
     checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
     if not isinstance(checkpoint, dict) or "model" not in checkpoint:
-        raise ValueError("재개할 체크포인트 형식이 올바르지 않습니다.")
+        raise ValueError("The resume checkpoint is invalid.")
+    saved_config = checkpoint.get("config", {})
+    if saved_config.get("vocab_size") != tokenizer.vocab_size:
+        raise ValueError("The checkpoint and tokenizer vocabulary sizes do not match.")
+    saved_fingerprint = checkpoint.get("tokenizer_fingerprint")
+    if saved_fingerprint and saved_fingerprint != tokenizer.fingerprint():
+        raise ValueError("The checkpoint was created with a different tokenizer.")
     model.load_state_dict(checkpoint["model"])
     return model, int(checkpoint.get("step", 0)), checkpoint.get("best_loss")
 
@@ -299,15 +315,15 @@ def train(args: argparse.Namespace) -> None:
     set_seed(args.seed)
     device = resolve_device(args.device)
     amp_dtype = resolve_amp_dtype(device, args.dtype)
-    tokenizer = NativeTokenizer()
+    tokenizer = NativeTokenizer.load(args.tokenizer)
     documents = list(iter_documents(args.data))
     if not documents:
         if args.require_real_data:
-            raise RuntimeError("실제 학습 데이터가 없습니다.")
+            raise RuntimeError("No training data was found.")
         documents = [
-            "초기 점검용 데이터입니다. 실제 학습에서는 충분한 라이선스 확인 데이터가 필요합니다."
+            "This is smoke-test data. Real training requires enough licensed English text."
         ]
-        print("[주의] 데이터가 없어 점검용 문장으로 실행합니다.")
+        print("[warning] No data was found; using one smoke-test sentence.")
 
     dataset = PackedTextDataset(documents, tokenizer, args.seq_len)
     loader = DataLoader(
@@ -319,9 +335,9 @@ def train(args: argparse.Namespace) -> None:
         drop_last=True,
     )
     if len(loader) == 0:
-        raise RuntimeError("배치가 하나도 만들어지지 않았습니다.")
+        raise RuntimeError("The dataset did not produce a complete batch.")
 
-    model, resume_step, best_loss = load_or_create_model(args)
+    model, resume_step, best_loss = load_or_create_model(args, tokenizer)
     model.to(device)
     if args.grad_checkpointing:
         model.enable_gradient_checkpointing()
@@ -350,7 +366,7 @@ def train(args: argparse.Namespace) -> None:
     running_loss = 0.0
 
     print(
-        f"[정보] 학습을 시작합니다. device={device}, "
+        f"[info] Training started. device={device}, "
         f"dtype={amp_dtype or torch.float32}, documents={len(documents)}, "
         f"batches={len(loader)}"
     )
@@ -386,7 +402,7 @@ def train(args: argparse.Namespace) -> None:
             elapsed = max(1e-6, time.perf_counter() - started_at)
             tokens = step * args.grad_accumulation * args.batch_size * args.seq_len
             print(
-                f"[정보] step={step}/{args.max_steps} "
+                f"[info] step={step}/{args.max_steps} "
                 f"loss={average_loss:.4f} best={best_loss:.4f} "
                 f"lr={optimizer.param_groups[0]['lr']:.3e} "
                 f"tokens/s={tokens / elapsed:.1f}"
@@ -399,6 +415,7 @@ def train(args: argparse.Namespace) -> None:
                 scheduler=scheduler,
                 step=step,
                 best_loss=best_loss,
+                tokenizer_fingerprint=tokenizer.fingerprint(),
             )
             if average_loss <= best_loss:
                 save_checkpoint(
@@ -408,8 +425,9 @@ def train(args: argparse.Namespace) -> None:
                     scheduler=scheduler,
                     step=step,
                     best_loss=best_loss,
+                    tokenizer_fingerprint=tokenizer.fingerprint(),
                 )
-            print(f"[정보] 체크포인트를 저장했습니다: {args.output_dir}")
+            print(f"[info] Saved checkpoint to {args.output_dir}")
 
 
 if __name__ == "__main__":

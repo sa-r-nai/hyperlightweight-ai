@@ -1,4 +1,4 @@
-"""NativeByteLM-500M: a from-scratch decoder-only language model.
+"""NativeEnglishLM-200M: a from-scratch decoder-only language model.
 
 This file owns the model definition used by the repository's new training and
 inference paths.  It does not import Hugging Face Transformers, load external
@@ -6,13 +6,13 @@ weights, or depend on a model-specific tokenizer.
 
 Architecture summary:
     token embedding + learned position embedding
-    24 pre-LayerNorm decoder blocks
+    20 pre-LayerNorm decoder blocks
     full multi-head causal self-attention
     two-layer GELU feed-forward network
     tied language-model head
 
-The default configuration contains approximately 498.5M trainable parameters
-with the repository's 264-token UTF-8 byte vocabulary and a 2048-token context.
+The default configuration contains approximately 201.9M trainable parameters
+with an 8192-token English BPE vocabulary and a 2048-token context.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import json
 import math
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import torch
 from torch import nn
@@ -32,43 +32,43 @@ from native_tokenizer import NativeTokenizer
 
 
 @dataclass
-class Native500MConfig:
+class Native200MConfig:
     """Configuration for the default model and small smoke-test variants."""
 
-    vocab_size: int = NativeTokenizer.vocab_size
+    vocab_size: int = 8192
     max_seq_len: int = 2048
-    d_model: int = 1280
-    n_layers: int = 24
-    n_heads: int = 20
-    d_ff: int = 5504
+    d_model: int = 896
+    n_layers: int = 20
+    n_heads: int = 14
+    d_ff: int = 3584
     dropout: float = 0.0
     tie_embeddings: bool = True
     use_bias: bool = False
     init_std: float = 0.02
 
     def __post_init__(self) -> None:
-        if self.vocab_size < 8:
-            raise ValueError("vocab_size는 특수 토큰 수보다 커야 합니다.")
+        if self.vocab_size < NativeTokenizer.base_vocab_size:
+            raise ValueError("vocab_size must include the special and ASCII base tokens.")
         if self.max_seq_len <= 0:
-            raise ValueError("max_seq_len은 양수여야 합니다.")
+            raise ValueError("max_seq_len must be positive.")
         if self.d_model <= 0 or self.d_ff <= 0:
-            raise ValueError("d_model과 d_ff는 양수여야 합니다.")
+            raise ValueError("d_model and d_ff must be positive.")
         if self.n_layers <= 0 or self.n_heads <= 0:
-            raise ValueError("n_layers와 n_heads는 양수여야 합니다.")
+            raise ValueError("n_layers and n_heads must be positive.")
         if self.d_model % self.n_heads != 0:
-            raise ValueError("d_model은 n_heads로 나누어져야 합니다.")
+            raise ValueError("d_model must be divisible by n_heads.")
         if not 0.0 <= self.dropout < 1.0:
-            raise ValueError("dropout은 0 이상 1 미만이어야 합니다.")
+            raise ValueError("dropout must be at least zero and less than one.")
 
     @property
     def head_dim(self) -> int:
         return self.d_model // self.n_heads
 
-    def with_sequence_length(self, seq_len: int) -> "Native500MConfig":
+    def with_sequence_length(self, seq_len: int) -> "Native200MConfig":
         return replace(self, max_seq_len=seq_len)
 
 
-def estimate_parameter_count(config: Native500MConfig) -> int:
+def estimate_parameter_count(config: Native200MConfig) -> int:
     """Return the exact count for the bias-free/tied default parameterization."""
 
     embedding = config.vocab_size * config.d_model
@@ -89,8 +89,8 @@ def estimate_parameter_count(config: Native500MConfig) -> int:
     return total
 
 
-SMOKE_CONFIG = Native500MConfig(
-    vocab_size=NativeTokenizer.vocab_size,
+SMOKE_CONFIG = Native200MConfig(
+    vocab_size=NativeTokenizer.base_vocab_size,
     max_seq_len=128,
     d_model=96,
     n_layers=3,
@@ -131,7 +131,7 @@ def _causal_attention(
 
 
 class CausalSelfAttention(nn.Module):
-    def __init__(self, config: Native500MConfig) -> None:
+    def __init__(self, config: Native200MConfig) -> None:
         super().__init__()
         self.n_heads = config.n_heads
         self.head_dim = config.head_dim
@@ -179,7 +179,7 @@ class CausalSelfAttention(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, config: Native500MConfig) -> None:
+    def __init__(self, config: Native200MConfig) -> None:
         super().__init__()
         self.input = nn.Linear(config.d_model, config.d_ff, bias=config.use_bias)
         self.output = nn.Linear(config.d_ff, config.d_model, bias=config.use_bias)
@@ -192,7 +192,7 @@ class FeedForward(nn.Module):
 
 
 class DecoderBlock(nn.Module):
-    def __init__(self, config: Native500MConfig) -> None:
+    def __init__(self, config: Native200MConfig) -> None:
         super().__init__()
         self.attention_norm = nn.LayerNorm(
             config.d_model,
@@ -220,7 +220,7 @@ class DecoderBlock(nn.Module):
 class NativeCausalLM(nn.Module):
     """Decoder-only causal language model trained from random initialization."""
 
-    def __init__(self, config: Native500MConfig) -> None:
+    def __init__(self, config: Native200MConfig) -> None:
         super().__init__()
         self.config = config
         self.gradient_checkpointing = False
@@ -264,14 +264,14 @@ class NativeCausalLM(nn.Module):
         labels: Optional[torch.Tensor] = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if input_ids.dim() != 2:
-            raise ValueError("input_ids는 [batch, sequence] 형태여야 합니다.")
+            raise ValueError("input_ids must have shape [batch, sequence].")
         if input_ids.size(1) > self.config.max_seq_len:
             raise ValueError(
-                f"입력 길이 {input_ids.size(1)}가 최대 길이 "
-                f"{self.config.max_seq_len}를 초과했습니다."
+                f"Input length {input_ids.size(1)} exceeds the maximum length "
+                f"of {self.config.max_seq_len}."
             )
         if input_ids.numel() and int(input_ids.max()) >= self.config.vocab_size:
-            raise ValueError("input_ids에 모델 어휘 크기를 벗어난 토큰이 있습니다.")
+            raise ValueError("input_ids contains a token outside the model vocabulary.")
 
         positions = torch.arange(
             input_ids.size(1),
@@ -295,7 +295,7 @@ class NativeCausalLM(nn.Module):
         if labels is None:
             return logits
         if labels.shape != input_ids.shape:
-            raise ValueError("labels는 input_ids와 같은 형태여야 합니다.")
+            raise ValueError("labels must have the same shape as input_ids.")
         shift_logits = logits[:, :-1, :].contiguous()
         shift_labels = labels[:, 1:].contiguous()
         loss = F.cross_entropy(
@@ -316,18 +316,18 @@ class NativeCausalLM(nn.Module):
         top_p: Optional[float] = 0.9,
         repetition_penalty: float = 1.05,
         eos_token_id: int = NativeTokenizer.eos_token_id,
-        ascii_only: bool = False,
+        allowed_token_ids: Optional[Sequence[int]] = None,
     ) -> torch.Tensor:
         """Generate tokens with the same explicit sampling stages as training."""
 
         if input_ids.dim() != 2:
-            raise ValueError("input_ids는 [batch, sequence] 형태여야 합니다.")
+            raise ValueError("input_ids must have shape [batch, sequence].")
         if temperature < 0.0:
-            raise ValueError("temperature는 0 이상이어야 합니다.")
+            raise ValueError("temperature must be at least zero.")
         if top_p is not None and not 0.0 < top_p <= 1.0:
-            raise ValueError("top_p는 0보다 크고 1 이하여야 합니다.")
+            raise ValueError("top_p must be greater than zero and at most one.")
         if repetition_penalty <= 0.0:
-            raise ValueError("repetition_penalty는 0보다 커야 합니다.")
+            raise ValueError("repetition_penalty must be greater than zero.")
 
         self.eval()
         generated = input_ids
@@ -341,14 +341,11 @@ class NativeCausalLM(nn.Module):
             context = generated[:, -self.config.max_seq_len :]
             logits = self(context)[:, -1, :]
 
-            if ascii_only:
-                # Keep English generation valid by allowing only EOS,
-                # printable ASCII, tab, and newline.
+            if allowed_token_ids is not None:
                 allowed = torch.zeros_like(logits, dtype=torch.bool)
                 allowed[:, eos_token_id] = True
-                allowed_bytes = [9, 10] + list(range(32, 127))
                 allowed_ids = torch.tensor(
-                    [NativeTokenizer.byte_offset + value for value in allowed_bytes],
+                    list(allowed_token_ids),
                     device=logits.device,
                 )
                 allowed[:, allowed_ids] = True
@@ -399,11 +396,11 @@ class NativeCausalLM(nn.Module):
         return generated
 
 
-def config_from_checkpoint(checkpoint: dict[str, Any]) -> Native500MConfig:
+def config_from_checkpoint(checkpoint: dict[str, Any]) -> Native200MConfig:
     config_data = checkpoint.get("config") or checkpoint.get("model_config")
     if not isinstance(config_data, dict):
-        raise ValueError("체크포인트에 모델 설정이 없습니다.")
-    return Native500MConfig(**config_data)
+        raise ValueError("The checkpoint does not contain a model configuration.")
+    return Native200MConfig(**config_data)
 
 
 def save_checkpoint(
@@ -414,19 +411,22 @@ def save_checkpoint(
     scheduler: Optional[Any] = None,
     step: int = 0,
     best_loss: Optional[float] = None,
+    tokenizer_fingerprint: Optional[str] = None,
 ) -> None:
     """Save a self-describing training checkpoint."""
 
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload: dict[str, Any] = {
-        "format": "nativebytelm-checkpoint-v1",
+        "format": "native-english-lm-checkpoint-v1",
         "step": step,
         "best_loss": best_loss,
         "config": asdict(model.config),
         "parameter_count": sum(parameter.numel() for parameter in model.parameters()),
         "model": model.state_dict(),
     }
+    if tokenizer_fingerprint is not None:
+        payload["tokenizer_fingerprint"] = tokenizer_fingerprint
     if optimizer is not None:
         payload["optimizer"] = optimizer.state_dict()
     if scheduler is not None:
@@ -441,22 +441,22 @@ def load_checkpoint(
 ) -> tuple[NativeCausalLM, dict[str, Any]]:
     checkpoint = torch.load(path, map_location=map_location, weights_only=False)
     if not isinstance(checkpoint, dict):
-        raise ValueError("지원하지 않는 체크포인트 형식입니다.")
+        raise ValueError("Unsupported checkpoint format.")
     config = config_from_checkpoint(checkpoint)
     model = NativeCausalLM(config)
     model.load_state_dict(checkpoint["model"])
     return model, checkpoint
 
 
-def write_config(path: str | Path, config: Native500MConfig) -> None:
+def write_config(path: str | Path, config: Native200MConfig) -> None:
     Path(path).write_text(
         json.dumps(
             {
-                "format": "nativebytelm-config-v1",
+                "format": "native-english-lm-config-v1",
                 "config": asdict(config),
                 "estimated_parameter_count": estimate_parameter_count(config),
             },
-            ensure_ascii=False,
+            ensure_ascii=True,
             indent=2,
         )
         + "\n",
@@ -465,7 +465,7 @@ def write_config(path: str | Path, config: Native500MConfig) -> None:
 
 
 __all__ = [
-    "Native500MConfig",
+    "Native200MConfig",
     "NativeCausalLM",
     "SMOKE_CONFIG",
     "config_from_checkpoint",

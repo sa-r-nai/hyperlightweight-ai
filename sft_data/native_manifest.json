@@ -1,5 +1,5 @@
 {
-  "format": "nativebytelm-messages-jsonl-v1",
+  "format": "native-english-messages-jsonl-v1",
   "random_seed": 42,
   "validation_ratio": 0.02,
   "record_counts": {
@@ -10,18 +10,18 @@
   },
   "sources": [
     {
-      "path": "data\\native_sft_seed.jsonl",
+      "path": "data/native_sft_seed.jsonl",
       "sha256": "fa3acc1646e11f7c1c20b687ff9dd897bbabaf92bda7ca5142f77b26d7443cf4",
       "license": "self-authored"
     }
   ],
   "outputs": [
     {
-      "path": "sft_data\\native_sft_train.jsonl",
+      "path": "sft_data/native_sft_train.jsonl",
       "sha256": "2f006cbf64fd074a1800956b7a5fd627bdfb229e569a9e12790823ad95480cd8"
     },
     {
-      "path": "sft_data\\native_sft_validation.jsonl",
+      "path": "sft_data/native_sft_validation.jsonl",
       "sha256": "d0fee3a05b7ca060a92baa4d2639d68dd04c857f9b6a4ac23926f34302ee3332"
     }
   ],
