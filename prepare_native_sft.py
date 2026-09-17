@@ -120,15 +120,15 @@ def main() -> None:
         },
         "sources": [
             {
-                "path": str(path),
+                "path": path.as_posix(),
                 "sha256": sha256(path),
                 "license": "self-authored" if "native_sft_seed" in path.name else "recorded-by-caller",
             }
             for path in input_paths
         ],
         "outputs": [
-            {"path": str(train_path), "sha256": sha256(train_path)},
-            {"path": str(validation_path), "sha256": sha256(validation_path)},
+            {"path": train_path.as_posix(), "sha256": sha256(train_path)},
+            {"path": validation_path.as_posix(), "sha256": sha256(validation_path)},
         ],
         "model_relationship": (
             "These records are independent training material. No pretrained "

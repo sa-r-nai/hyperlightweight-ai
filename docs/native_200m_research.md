@@ -7,9 +7,12 @@ initialization. It does not copy or convert external checkpoints, tokenizer
 artifacts, chat templates, or model classes. Training data remains a separate
 input asset whose provenance and license must be recorded.
 
-The repository seed is a pipeline fixture, not a useful pretraining corpus.
-Producing a capable model still requires large-scale licensed English data,
-substantial compute, validation splits, and downstream evaluation.
+The repository includes a deterministic self-authored synthetic corpus for
+pipeline checks and initial experiments. It mixes technical explanations,
+arithmetic, small Python reasoning tasks, and workplace writing. It is not a
+useful production-scale pretraining corpus. Producing a capable model still
+requires large-scale licensed English data, substantial compute, validation
+splits, and downstream evaluation.
 
 ## Architecture
 

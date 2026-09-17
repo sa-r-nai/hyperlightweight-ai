@@ -122,7 +122,7 @@ def main() -> None:
         metadata={
             "target_vocab_size": args.target_vocab_size,
             "min_frequency": args.min_frequency,
-            "sources": [{"path": str(path), "sha256": sha256(path)} for path in paths],
+            "sources": [{"path": path.as_posix(), "sha256": sha256(path)} for path in paths],
         },
     )
     print(f"[info] Wrote {tokenizer.vocab_size}-token English BPE model to {args.output}")

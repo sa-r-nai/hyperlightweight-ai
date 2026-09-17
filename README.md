@@ -62,8 +62,10 @@ python generate_native_data.py
 python prepare_native_sft.py
 ```
 
-The included seed files only verify the pipeline. They are far too small to
-train a useful 200M language model.
+The generator creates 5,000 deterministic, self-authored pretraining records
+covering technical concepts, arithmetic, small Python reasoning tasks, and
+workplace writing. The included data is substantially larger than the original
+fixture, but it is still far too small to train a useful 200M language model.
 
 ## Train the tokenizer
 
@@ -81,13 +83,14 @@ A small corpus may stop below the target when no pair meets the minimum
 frequency. Production training should rebuild the tokenizer from the complete,
 licensed English pretraining corpus before model training.
 
-The checked-in tokenizer has 1,330 tokens because the included seed corpus is
-small; 8,192 is the production target rather than the size of this fixture.
+The checked-in tokenizer has 3,083 tokens after training on the included
+5,000-record corpus. The corpus contains about 354,000 BPE tokens; 8,192 is
+still the production vocabulary target rather than the size of this fixture.
 
 ## Test
 
 ```bash
-python -m unittest -v test_native_200m.py
+python -m unittest -v
 ```
 
 Run a CPU smoke test before a full CUDA job:
@@ -144,6 +147,7 @@ The checkpoint and tokenizer must have the same vocabulary size.
 - `train_native_200m.py`: causal pretraining loop
 - `chat_native_200m.py`: interactive generation
 - `generate_native_data.py`: self-authored English seed data
+- `generate_native_corpus.py`: deterministic 5,000-record corpus builder
 - `prepare_native_sft.py`: SFT validation, deduplication, and split
 - `test_native_200m.py`: tokenizer, causality, loss, and generation tests
 - `docs/native_200m_research.md`: design rationale and limitations

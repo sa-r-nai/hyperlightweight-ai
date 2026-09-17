@@ -1,10 +1,12 @@
-"""Create a small, self-authored English seed corpus for smoke tests."""
+"""Create reproducible, self-authored English data for local experiments."""
 
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
+
+from generate_native_corpus import write_pretraining_corpus
 
 
 SYSTEM_PROMPT = (
@@ -96,7 +98,7 @@ def validate_records(records: list[dict]) -> None:
             message["content"].encode("ascii")
 
 
-def write_outputs(output_dir: Path) -> None:
+def write_outputs(output_dir: Path, pretraining_records: int, seed: int) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     records = build_records()
     validate_records(records)
@@ -110,15 +112,22 @@ def write_outputs(output_dir: Path) -> None:
         encoding="ascii",
         newline="\n",
     )
+    write_pretraining_corpus(
+        output_dir / "english_training_corpus.jsonl",
+        target_count=pretraining_records,
+        seed=seed,
+    )
     print(f"[info] Generated {len(records)} English SFT records: {sft_path}")
     print(f"[info] Generated {len(PASSAGES)} English passages: {pretraining_path}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Self-authored English seed generator")
+    parser = argparse.ArgumentParser(description="Self-authored English data generator")
     parser.add_argument("--output-dir", type=Path, default=Path("data"))
+    parser.add_argument("--pretraining-records", type=int, default=5000)
+    parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
-    write_outputs(args.output_dir)
+    write_outputs(args.output_dir, args.pretraining_records, args.seed)
 
 
 if __name__ == "__main__":
