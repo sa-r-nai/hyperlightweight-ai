@@ -3,9 +3,11 @@ from __future__ import annotations
 import unittest
 
 import torch
+from torch.nn import functional as F
 
 from native_200m import Native200MConfig, NativeCausalLM, SMOKE_CONFIG, estimate_parameter_count
 from native_tokenizer import NativeTokenizer
+from train_native_200m import PackedTextDataset, split_documents
 from train_native_tokenizer import train_bpe
 
 
@@ -54,6 +56,53 @@ class NativeModelTests(unittest.TestCase):
         logits, loss = model(input_ids, input_ids)
         self.assertEqual(tuple(logits.shape), (2, 20, SMOKE_CONFIG.vocab_size))
         self.assertTrue(torch.isfinite(loss))
+
+    def test_training_targets_are_shifted_exactly_once(self) -> None:
+        tokenizer = NativeTokenizer()
+        dataset = PackedTextDataset(["abc"], tokenizer, seq_len=3)
+        input_ids, labels = dataset[0]
+        self.assertEqual(
+            input_ids.tolist(),
+            [
+                tokenizer.bos_token_id,
+                tokenizer.byte_offset + ord("a"),
+                tokenizer.byte_offset + ord("b"),
+            ],
+        )
+        self.assertEqual(
+            labels.tolist(),
+            [
+                tokenizer.byte_offset + ord("a"),
+                tokenizer.byte_offset + ord("b"),
+                tokenizer.byte_offset + ord("c"),
+            ],
+        )
+
+        config = Native200MConfig(
+            vocab_size=tokenizer.vocab_size,
+            max_seq_len=3,
+            d_model=16,
+            n_layers=1,
+            n_heads=2,
+            d_ff=32,
+        )
+        model = NativeCausalLM(config)
+        logits, loss = model(input_ids.unsqueeze(0), labels.unsqueeze(0))
+        expected = F.cross_entropy(
+            logits.reshape(-1, logits.size(-1)),
+            labels.reshape(-1),
+        )
+        self.assertTrue(torch.allclose(loss, expected))
+
+    def test_document_split_is_deterministic_and_disjoint(self) -> None:
+        documents = [f"document-{index}" for index in range(20)]
+        first = split_documents(documents, validation_ratio=0.2, seed=42)
+        second = split_documents(documents, validation_ratio=0.2, seed=42)
+        self.assertEqual(first, second)
+        train_documents, validation_documents = first
+        self.assertEqual(len(train_documents), 16)
+        self.assertEqual(len(validation_documents), 4)
+        self.assertTrue(set(train_documents).isdisjoint(validation_documents))
 
     def test_future_tokens_do_not_change_previous_logits(self) -> None:
         torch.manual_seed(11)

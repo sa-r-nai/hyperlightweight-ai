@@ -53,7 +53,10 @@ size, and minimum pair frequency.
 
 Training uses next-token cross-entropy over packed documents, AdamW with
 betas=(0.9, 0.95), linear warmup, and cosine decay. CUDA AMP and gradient
-checkpointing are available. CPU mode exists for smoke tests but is not a
+checkpointing are available. Input positions are paired with their next-token
+targets exactly once. By default, documents are deterministically split into
+training and validation sets, and the best checkpoint is selected using
+held-out validation loss. CPU mode exists for smoke tests but is not a
 practical way to pretrain the full model.
 
 At 201,924,352 parameters, raw model weights require approximately:

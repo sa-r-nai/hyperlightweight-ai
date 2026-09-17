@@ -33,6 +33,23 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train NativeEnglishLM-200M from scratch.")
     parser.add_argument("--data", type=Path, default=Path("data"))
     parser.add_argument(
+        "--validation-data",
+        type=Path,
+        help="Optional separate validation file or directory.",
+    )
+    parser.add_argument(
+        "--validation-ratio",
+        type=float,
+        default=0.02,
+        help="Document-level validation split used when --validation-data is omitted.",
+    )
+    parser.add_argument(
+        "--validation-seq-len",
+        type=int,
+        default=256,
+        help="Sequence length used for validation batches.",
+    )
+    parser.add_argument(
         "--tokenizer",
         type=Path,
         default=Path("tokenizer/native_english_bpe.json"),
@@ -63,6 +80,7 @@ def parse_args() -> argparse.Namespace:
         default="auto",
     )
     parser.add_argument("--checkpoint-every", type=int, default=250)
+    parser.add_argument("--eval-every", type=int, default=250)
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -77,6 +95,29 @@ def set_seed(seed: int) -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+
+
+def validate_args(args: argparse.Namespace) -> None:
+    positive_values = {
+        "--seq-len": args.seq_len,
+        "--batch-size": args.batch_size,
+        "--grad-accumulation": args.grad_accumulation,
+        "--max-steps": args.max_steps,
+        "--checkpoint-every": args.checkpoint_every,
+        "--eval-every": args.eval_every,
+        "--log-every": args.log_every,
+    }
+    for name, value in positive_values.items():
+        if value <= 0:
+            raise ValueError(f"{name} must be positive.")
+    if args.seq_len < 2 or args.validation_seq_len < 2:
+        raise ValueError("Training and validation sequence lengths must be at least two.")
+    if args.warmup_steps < 0:
+        raise ValueError("--warmup-steps must not be negative.")
+    if args.lr <= 0.0 or not 0.0 <= args.min_lr <= args.lr:
+        raise ValueError("Learning rates must satisfy 0 <= --min-lr <= --lr and --lr > 0.")
+    if args.num_workers < 0:
+        raise ValueError("--num-workers must not be negative.")
 
 
 def resolve_device(name: str) -> torch.device:
@@ -211,6 +252,7 @@ class PackedTextDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
                 f"only {len(tokens)}."
             )
         self.tokens = torch.tensor(tokens, dtype=torch.long)
+        self.token_count = len(tokens)
         self.seq_len = seq_len
         self.examples = (len(self.tokens) - 1) // seq_len
 
@@ -221,6 +263,56 @@ class PackedTextDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         start = index * self.seq_len
         values = self.tokens[start : start + self.seq_len + 1]
         return values[:-1], values[1:]
+
+
+def split_documents(
+    documents: Sequence[TrainingRecord],
+    validation_ratio: float,
+    seed: int,
+) -> tuple[list[TrainingRecord], list[TrainingRecord]]:
+    """Create a deterministic document-level train/validation split."""
+
+    if not 0.0 <= validation_ratio < 1.0:
+        raise ValueError("--validation-ratio must be at least zero and less than one.")
+    items = list(documents)
+    if validation_ratio == 0.0:
+        return items, []
+    if len(items) < 2:
+        raise ValueError(
+            "At least two documents are required for an automatic validation split. "
+            "Provide --validation-data or pass --validation-ratio 0."
+        )
+    indices = list(range(len(items)))
+    random.Random(seed).shuffle(indices)
+    validation_count = max(1, round(len(items) * validation_ratio))
+    validation_count = min(validation_count, len(items) - 1)
+    validation_indices = set(indices[:validation_count])
+    train_documents = [item for index, item in enumerate(items) if index not in validation_indices]
+    validation_documents = [item for index, item in enumerate(items) if index in validation_indices]
+    return train_documents, validation_documents
+
+
+@torch.no_grad()
+def evaluate(
+    model: NativeCausalLM,
+    loader: DataLoader,
+    device: torch.device,
+    amp_dtype: torch.dtype | None,
+) -> float:
+    model.eval()
+    total_loss = 0.0
+    batches = 0
+    for input_ids, labels in loader:
+        input_ids = input_ids.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+        with autocast_context(device, amp_dtype):
+            _, loss = model(input_ids, labels)
+        total_loss += float(loss.item())
+        batches += 1
+    model.train()
+    if batches == 0:
+        raise RuntimeError("The validation dataset did not produce any batches.")
+    return total_loss / batches
 
 
 def build_optimizer(model: nn.Module, lr: float, weight_decay: float) -> torch.optim.Optimizer:
@@ -312,6 +404,7 @@ def load_or_create_model(
 
 
 def train(args: argparse.Namespace) -> None:
+    validate_args(args)
     set_seed(args.seed)
     device = resolve_device(args.device)
     amp_dtype = resolve_amp_dtype(device, args.dtype)
@@ -322,10 +415,22 @@ def train(args: argparse.Namespace) -> None:
             raise RuntimeError("No training data was found.")
         documents = [
             "This is smoke-test data. Real training requires enough licensed English text."
-        ]
-        print("[warning] No data was found; using one smoke-test sentence.")
+        ] * 256
+        print("[warning] No data was found; using repeated smoke-test text.")
 
-    dataset = PackedTextDataset(documents, tokenizer, args.seq_len)
+    if args.validation_data is not None:
+        validation_documents = list(iter_documents(args.validation_data))
+        if not validation_documents:
+            raise RuntimeError("No validation data was found.")
+        train_documents = documents
+    else:
+        train_documents, validation_documents = split_documents(
+            documents,
+            args.validation_ratio,
+            args.seed,
+        )
+
+    dataset = PackedTextDataset(train_documents, tokenizer, args.seq_len)
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -336,6 +441,24 @@ def train(args: argparse.Namespace) -> None:
     )
     if len(loader) == 0:
         raise RuntimeError("The dataset did not produce a complete batch.")
+
+    validation_loader: DataLoader | None = None
+    validation_dataset: PackedTextDataset | None = None
+    if validation_documents:
+        validation_seq_len = min(args.validation_seq_len, args.seq_len)
+        validation_dataset = PackedTextDataset(
+            validation_documents,
+            tokenizer,
+            validation_seq_len,
+        )
+        validation_loader = DataLoader(
+            validation_dataset,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=device.type == "cuda",
+            drop_last=False,
+        )
 
     model, resume_step, best_loss = load_or_create_model(args, tokenizer)
     model.to(device)
@@ -367,9 +490,17 @@ def train(args: argparse.Namespace) -> None:
 
     print(
         f"[info] Training started. device={device}, "
-        f"dtype={amp_dtype or torch.float32}, documents={len(documents)}, "
-        f"batches={len(loader)}"
+        f"dtype={amp_dtype or torch.float32}, train_documents={len(train_documents)}, "
+        f"train_tokens={dataset.token_count}, batches={len(loader)}, "
+        f"validation_documents={len(validation_documents)}, "
+        f"validation_batches={len(validation_loader) if validation_loader else 0}"
     )
+    if args.preset == "native-200m" and dataset.token_count < 100_000_000:
+        print(
+            "[warning] This corpus is far too small for a useful 200M model. "
+            "Treat this as a pipeline test and supply a much larger licensed corpus "
+            "before a production run."
+        )
 
     while step < args.max_steps:
         for _ in range(args.grad_accumulation):
@@ -397,27 +528,26 @@ def train(args: argparse.Namespace) -> None:
 
         average_loss = running_loss / args.grad_accumulation
         running_loss = 0.0
-        best_loss = average_loss if best_loss is None else min(best_loss, average_loss)
         if step % args.log_every == 0 or step == 1:
             elapsed = max(1e-6, time.perf_counter() - started_at)
             tokens = step * args.grad_accumulation * args.batch_size * args.seq_len
             print(
                 f"[info] step={step}/{args.max_steps} "
-                f"loss={average_loss:.4f} best={best_loss:.4f} "
+                f"train_loss={average_loss:.4f} "
+                f"best_validation_loss={best_loss if best_loss is not None else 'n/a'} "
                 f"lr={optimizer.param_groups[0]['lr']:.3e} "
                 f"tokens/s={tokens / elapsed:.1f}"
             )
-        if step % args.checkpoint_every == 0 or step == args.max_steps:
-            save_checkpoint(
-                args.output_dir / "last.pt",
-                model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                step=step,
-                best_loss=best_loss,
-                tokenizer_fingerprint=tokenizer.fingerprint(),
-            )
-            if average_loss <= best_loss:
+
+        should_evaluate = (
+            validation_loader is not None
+            and (step % args.eval_every == 0 or step == args.max_steps)
+        )
+        if should_evaluate:
+            validation_loss = evaluate(model, validation_loader, device, amp_dtype)
+            print(f"[info] step={step} validation_loss={validation_loss:.4f}")
+            if best_loss is None or validation_loss < best_loss:
+                best_loss = validation_loss
                 save_checkpoint(
                     args.output_dir / "best.pt",
                     model,
@@ -427,6 +557,30 @@ def train(args: argparse.Namespace) -> None:
                     best_loss=best_loss,
                     tokenizer_fingerprint=tokenizer.fingerprint(),
                 )
+                print(f"[info] Saved new best checkpoint to {args.output_dir / 'best.pt'}")
+
+        should_checkpoint = step % args.checkpoint_every == 0 or step == args.max_steps
+        if should_checkpoint:
+            if validation_loader is None and (best_loss is None or average_loss < best_loss):
+                best_loss = average_loss
+                save_checkpoint(
+                    args.output_dir / "best.pt",
+                    model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    step=step,
+                    best_loss=best_loss,
+                    tokenizer_fingerprint=tokenizer.fingerprint(),
+                )
+            save_checkpoint(
+                args.output_dir / "last.pt",
+                model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                step=step,
+                best_loss=best_loss,
+                tokenizer_fingerprint=tokenizer.fingerprint(),
+            )
             print(f"[info] Saved checkpoint to {args.output_dir}")
 
 

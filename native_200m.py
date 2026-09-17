@@ -296,11 +296,12 @@ class NativeCausalLM(nn.Module):
             return logits
         if labels.shape != input_ids.shape:
             raise ValueError("labels must have the same shape as input_ids.")
-        shift_logits = logits[:, :-1, :].contiguous()
-        shift_labels = labels[:, 1:].contiguous()
+        # PackedTextDataset already aligns each input position with its
+        # next-token target.  Do not shift a second time here, or position t
+        # would be trained against token t + 2 instead of token t + 1.
         loss = F.cross_entropy(
-            shift_logits.view(-1, shift_logits.size(-1)),
-            shift_labels.view(-1),
+            logits.reshape(-1, logits.size(-1)),
+            labels.reshape(-1),
             ignore_index=-100,
         )
         return logits, loss

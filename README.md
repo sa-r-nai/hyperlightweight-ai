@@ -26,19 +26,40 @@ The tokenizer rejects non-ASCII text. This is intentional: this branch is an
 English-only experiment, not a multilingual model with an English system
 prompt.
 
-## Install
+## Lightning AI Studio quick start
 
-Install a CUDA-compatible PyTorch build first when using a GPU, then run:
+Start a GPU Studio, upload or clone this repository, and open a terminal in
+the repository root. Install the dependency and verify that CUDA is visible:
 
-```powershell
-python -m pip install -r .\requirements-native.txt
+```bash
+python -m pip install -r requirements-native.txt
+python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 ```
+
+Run a two-step GPU pipeline check before starting a long job:
+
+```bash
+python train_native_200m.py \
+  --device cuda \
+  --preset smoke \
+  --data ./data \
+  --seq-len 128 \
+  --batch-size 8 \
+  --grad-accumulation 1 \
+  --max-steps 2 \
+  --eval-every 1 \
+  --checkpoint-every 1 \
+  --output-dir ./checkpoints_native_smoke
+```
+
+This checks data loading, next-token target alignment, CUDA forward/backward
+execution, held-out validation, and checkpoint writing.
 
 ## Generate and validate seed data
 
-```powershell
-python .\generate_native_data.py
-python .\prepare_native_sft.py
+```bash
+python generate_native_data.py
+python prepare_native_sft.py
 ```
 
 The included seed files only verify the pipeline. They are far too small to
@@ -49,58 +70,67 @@ train a useful 200M language model.
 The tokenizer is trained from local English data and records source hashes in
 its artifact:
 
-```powershell
-python .\train_native_tokenizer.py `
-  --input .\data `
-  --target-vocab-size 8192 `
-  --output .\tokenizer\native_english_bpe.json
+```bash
+python train_native_tokenizer.py \
+  --input ./data \
+  --target-vocab-size 8192 \
+  --output ./tokenizer/native_english_bpe.json
 ```
 
 A small corpus may stop below the target when no pair meets the minimum
 frequency. Production training should rebuild the tokenizer from the complete,
 licensed English pretraining corpus before model training.
 
+The checked-in tokenizer has 1,330 tokens because the included seed corpus is
+small; 8,192 is the production target rather than the size of this fixture.
+
 ## Test
 
-```powershell
-python -m unittest -v .\test_native_200m.py
+```bash
+python -m unittest -v test_native_200m.py
 ```
 
 Run a CPU smoke test before a full CUDA job:
 
-```powershell
-python .\train_native_200m.py `
-  --device cpu `
-  --preset smoke `
-  --seq-len 128 `
+```bash
+python train_native_200m.py \
+  --device cpu \
+  --preset smoke \
+  --seq-len 128 \
   --max-steps 2
 ```
 
 ## Train
 
-```powershell
-python .\train_native_200m.py `
-  --device cuda `
-  --data .\data `
-  --tokenizer .\tokenizer\native_english_bpe.json `
-  --seq-len 2048 `
-  --batch-size 1 `
-  --grad-accumulation 8 `
-  --grad-checkpointing `
-  --max-steps 1000 `
-  --output-dir .\checkpoints_native_200m
+```bash
+python train_native_200m.py \
+  --device cuda \
+  --data /path/to/large-licensed-english-corpus \
+  --tokenizer ./tokenizer/native_english_bpe.json \
+  --require-real-data \
+  --seq-len 2048 \
+  --batch-size 1 \
+  --grad-accumulation 8 \
+  --grad-checkpointing \
+  --max-steps 1000 \
+  --eval-every 250 \
+  --checkpoint-every 250 \
+  --output-dir ./checkpoints_native_200m
 ```
 
 One thousand steps are only an execution example. A useful model requires a
 much larger token budget, held-out evaluation, and data-quality checks.
+When `--validation-data` is omitted, the trainer makes a deterministic
+document-level split using `--validation-ratio` (default 0.02). `best.pt` is
+selected by held-out validation loss; `last.pt` records the latest checkpoint.
 
 ## Chat
 
-```powershell
-python .\chat_native_200m.py `
-  --checkpoint .\checkpoints_native_200m\best.pt `
-  --tokenizer .\tokenizer\native_english_bpe.json `
-  --device cuda `
+```bash
+python chat_native_200m.py \
+  --checkpoint ./checkpoints_native_200m/best.pt \
+  --tokenizer ./tokenizer/native_english_bpe.json \
+  --device cuda \
   --message "Explain the difference between a cache and a backup."
 ```
 
