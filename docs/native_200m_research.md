@@ -14,6 +14,14 @@ useful production-scale pretraining corpus. Producing a capable model still
 requires large-scale licensed English data, substantial compute, validation
 splits, and downstream evaluation.
 
+The Lightning pipeline adds a production-scale acquisition path. It streams a
+pinned FineWeb-Edu `sample-10BT` revision for pretraining and a pinned
+Smol-SmolTalk revision for SFT. Smol-SmolTalk was curated specifically for
+models below one billion parameters. The defaults retain 1,000,000 usable
+pretraining documents, 400,000 chat conversations, and separate validation
+sets. These external records are generated on the training machine and are not
+committed to this repository.
+
 ## Architecture
 
 | Component | Calculation | Parameters |
@@ -64,6 +72,13 @@ trains assistant response and ending tokens, and can initialize model weights
 from a pretraining checkpoint while starting a fresh optimizer. CPU mode exists
 for smoke tests but is not a practical way to pretrain the full model.
 
+Large normalized corpora are converted to little-endian uint16 token streams.
+PyTorch maps those files on demand, so multi-billion-token input does not become
+a Python integer list in RAM. Chat streams have a parallel uint8 assistant-loss
+mask. Each token manifest records the tokenizer fingerprint, counts, source
+hash, and binary hashes; training refuses mismatched tokenizers or malformed
+file sizes.
+
 At 201,924,352 parameters, raw model weights require approximately:
 
 | Representation | Approximate weight storage |
@@ -102,7 +117,9 @@ Automated tests cover:
 6. deterministic generation shape;
 7. output-token filtering and chat turn termination;
 8. assistant-only SFT target masking;
-9. deterministic, unique, ASCII-only corpus generation.
+9. deterministic, unique, ASCII-only corpus generation;
+10. public-data normalization, strict chat role alternation, exact deduplication,
+    deterministic split writing, and binary assistant-mask generation.
 
 Production runs must also track validation loss, perplexity, effective tokens,
 gradient norms, overflow events, checkpoint hashes, tokenizer hash, hardware,
@@ -113,7 +130,10 @@ PyTorch/CUDA versions, and random seeds.
 - The included corpus is much too small for useful pretraining.
 - Synthetic conversations have narrower language and topic diversity than
   real, carefully licensed human conversations.
-- The current loader materializes tokenized data in memory.
+- Raw-file training still materializes tokenized data in memory and is intended
+  for tests; public-scale training must use the memory-mapped token manifests.
+- The public-data pipeline performs exact deduplication, not semantic or
+  near-duplicate detection, and source datasets may retain web-data biases.
 - Generation has no KV cache and recomputes the context for every token.
 - ASCII-only operation excludes accented English names, typographic
   punctuation, mathematical Unicode symbols, and other languages.
@@ -126,3 +146,5 @@ PyTorch/CUDA versions, and random seeds.
 4. PyTorch, [scaled dot product attention](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html)
 5. PyTorch, [automatic mixed precision](https://docs.pytorch.org/docs/stable/amp.html)
 6. PyTorch, [activation checkpointing](https://docs.pytorch.org/docs/stable/checkpoint.html)
+7. Hugging Face, [FineWeb-Edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu)
+8. Hugging Face, [Smol-SmolTalk](https://huggingface.co/datasets/HuggingFaceTB/smol-smoltalk)

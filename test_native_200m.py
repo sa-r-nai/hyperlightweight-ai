@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import torch
 from torch.nn import functional as F
 
 from native_200m import Native200MConfig, NativeCausalLM, SMOKE_CONFIG, estimate_parameter_count
 from native_tokenizer import NativeTokenizer
-from train_native_200m import PackedTextDataset, split_documents
+from tokenize_native_data import tokenize_to_binary
+from train_native_200m import PackedTextDataset, TokenFileDataset, split_documents
 from train_native_tokenizer import train_bpe
 
 
@@ -158,6 +161,37 @@ class NativeModelTests(unittest.TestCase):
 
         self.assertEqual(input_ids.tolist(), stream[:-1])
         self.assertEqual(labels.tolist(), expected_labels.tolist())
+        self.assertGreater(int(labels.eq(-100).sum()), 0)
+        self.assertGreater(int(labels.ne(-100).sum()), 0)
+
+    def test_memory_mapped_chat_dataset_matches_assistant_mask(self) -> None:
+        tokenizer = NativeTokenizer()
+        messages = [
+            {"role": "system", "content": "Be helpful."},
+            {"role": "user", "content": "Hello."},
+            {"role": "assistant", "content": "Hi there."},
+        ]
+        with TemporaryDirectory() as directory:
+            manifest_path = Path(directory) / "chat.json"
+            manifest = tokenize_to_binary(
+                [messages] * 4,
+                tokenizer,
+                output_manifest=manifest_path,
+                assistant_only_loss=True,
+            )
+            dataset = TokenFileDataset(
+                manifest_path,
+                tokenizer,
+                seq_len=8,
+                require_assistant_mask=True,
+            )
+            input_ids, labels = dataset[0]
+            dataset_token_count = dataset.token_count
+            del dataset
+
+        self.assertEqual(dataset_token_count, manifest["token_count"])
+        self.assertEqual(tuple(input_ids.shape), (8,))
+        self.assertEqual(tuple(labels.shape), (8,))
         self.assertGreater(int(labels.eq(-100).sum()), 0)
         self.assertGreater(int(labels.ne(-100).sum()), 0)
 

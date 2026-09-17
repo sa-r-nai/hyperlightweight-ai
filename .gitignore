@@ -1,5 +1,7 @@
 # NativeEnglishLM checkpoints are generated locally and are not source files.
 checkpoints_native_*/
+public_data/
+tokenized_data/
 artifacts_native_200m/
 __pycache__/
 *.py[cod]

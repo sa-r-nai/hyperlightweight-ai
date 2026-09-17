@@ -36,6 +36,38 @@ python -m pip install -r requirements-native.txt
 python -c "import torch; print(torch.__version__, torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 ```
 
+For the full public-data pipeline, this is the single command to run:
+
+```bash
+python -m pip install -r requirements-native.txt && python run_lightning_pipeline.py
+```
+
+It streams and normalizes 1,000,000 FineWeb-Edu training documents and 400,000
+Smol-SmolTalk conversations by default, creates held-out validation sets,
+builds disk-backed token files, pretrains for four corpus passes, performs two
+chat-SFT passes with assistant-only loss, and runs the basic conversation gate.
+The public data itself is not committed to Git. Expect a long, storage- and
+compute-intensive job; this is a from-scratch 200M model rather than a quick
+fine-tune of pretrained weights.
+
+If data preparation finished but the Studio stopped during training, reuse the
+prepared artifacts and resume from `last.pt` automatically:
+
+```bash
+python run_lightning_pipeline.py --reuse-prepared
+```
+
+The public sources are pinned for reproducibility:
+
+- [FineWeb-Edu](https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu),
+  configuration `sample-10BT`, ODC-By-1.0 and subject to Common Crawl terms
+- [Smol-SmolTalk](https://huggingface.co/datasets/HuggingFaceTB/smol-smoltalk),
+  the Apache-2.0 SFT subset designed for models below one billion parameters
+
+`public_data/`, `tokenized_data/`, and checkpoints are ignored by Git. The
+generated manifests retain dataset revisions, licenses, source/output hashes,
+record counts, token counts, and the tokenizer fingerprint.
+
 Run a two-step GPU pipeline check before starting a long job:
 
 ```bash
@@ -62,11 +94,12 @@ python generate_native_data.py
 python prepare_native_sft.py
 ```
 
-The generator creates 5,000 deterministic, self-authored pretraining records
-and 6,000 chat conversations. The chat set contains 2,094 multi-turn examples
-covering everyday planning, clarification, debugging, study, writing, basic
-reasoning, greetings, corrections, and safe uncertainty. `prepare_native_sft.py`
-produces a deterministic 5,880/120 train-validation split.
+The local generator creates 5,000 deterministic, self-authored pretraining
+records and 6,000 chat conversations. The chat set contains 2,094 multi-turn
+examples covering everyday planning, clarification, debugging, study, writing,
+basic reasoning, greetings, corrections, and safe uncertainty.
+`prepare_native_sft.py` produces a deterministic 5,880/120 train-validation
+split.
 
 ## Train the tokenizer
 
@@ -105,7 +138,7 @@ python train_native_200m.py \
   --max-steps 2
 ```
 
-## Train
+## Manual large-corpus training
 
 ```bash
 python train_native_200m.py \
@@ -191,6 +224,9 @@ The checkpoint and tokenizer must have the same vocabulary size.
 - `native_200m.py`: model definition and checkpoint I/O
 - `native_tokenizer.py`: English ASCII BPE encoding and chat protocol
 - `train_native_tokenizer.py`: tokenizer training and source manifest
+- `prepare_public_data.py`: pinned FineWeb-Edu and Smol-SmolTalk streaming/normalization
+- `tokenize_native_data.py`: memory-mapped uint16 token and assistant-mask builder
+- `native_data.py`: shared text and chat record readers
 - `train_native_200m.py`: causal pretraining loop
 - `chat_native_200m.py`: interactive generation
 - `evaluate_native_chat.py`: deterministic basic-conversation quality gate
@@ -198,6 +234,7 @@ The checkpoint and tokenizer must have the same vocabulary size.
 - `generate_native_corpus.py`: deterministic 5,000-record corpus builder
 - `generate_native_chat_data.py`: deterministic single- and multi-turn chat builder
 - `prepare_native_sft.py`: SFT validation, deduplication, and split
+- `run_lightning_pipeline.py`: one-command public-data pretraining, SFT, and evaluation
 - `test_native_200m.py`: tokenizer, causality, loss, and generation tests
 - `test_native_data.py`: corpus determinism, uniqueness, and metadata tests
 - `docs/native_200m_research.md`: design rationale and limitations

@@ -7,7 +7,7 @@ import hashlib
 import json
 from collections import Counter
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Iterator
 
 from native_tokenizer import NativeTokenizer
 
@@ -25,20 +25,28 @@ def sha256(path: Path) -> str:
 
 def iter_paths(inputs: Iterable[Path]) -> list[Path]:
     paths: list[Path] = []
+    seen: set[Path] = set()
     for source in inputs:
-        candidates = [source] if source.is_file() else source.rglob("*")
-        paths.extend(
-            path
-            for path in candidates
-            if path.is_file() and path.suffix.lower() in SUPPORTED_SUFFIXES
-        )
-    return sorted(set(paths))
+        candidates = [source] if source.is_file() else sorted(source.rglob("*"))
+        for path in candidates:
+            if (
+                path not in seen
+                and path.is_file()
+                and path.suffix.lower() in SUPPORTED_SUFFIXES
+                and path.name.lower() not in {"manifest.json", "readme.info"}
+            ):
+                seen.add(path)
+                paths.append(path)
+    return paths
 
 
 def extract_text(path: Path) -> str:
-    raw = path.read_text(encoding="ascii")
-    if path.suffix.lower() not in {".json", ".jsonl"}:
-        return raw
+    """Return all training text from one file (convenience API for small files)."""
+
+    return "\n".join(iter_texts(path))
+
+
+def _record_texts(value: object) -> Iterator[str]:
     values: list[str] = []
 
     def visit(value: object) -> None:
@@ -66,13 +74,76 @@ def extract_text(path: Path) -> str:
                     if key not in ignored_metadata:
                         visit(item)
 
+    visit(value)
+    yield from values
+
+
+def iter_texts(path: Path) -> Iterator[str]:
+    """Yield records incrementally so multi-gigabyte JSONL stays memory bounded."""
+
     if path.suffix.lower() == ".jsonl":
-        for line in raw.splitlines():
-            if line.strip():
-                visit(json.loads(line))
-    else:
-        visit(json.loads(raw))
-    return "\n".join(values)
+        with path.open("r", encoding="ascii", errors="strict") as handle:
+            for line in handle:
+                if line.strip():
+                    yield from _record_texts(json.loads(line))
+        return
+    if path.suffix.lower() == ".json":
+        yield from _record_texts(json.loads(path.read_text(encoding="ascii")))
+        return
+    with path.open("r", encoding="ascii", errors="strict") as handle:
+        block: list[str] = []
+        block_characters = 0
+        for line in handle:
+            block.append(line)
+            block_characters += len(line)
+            if block_characters >= 1_000_000:
+                yield "".join(block)
+                block = []
+                block_characters = 0
+        if block:
+            yield "".join(block)
+
+
+def limited_texts(
+    paths: Iterable[Path],
+    *,
+    max_documents: int | None,
+    max_characters: int | None,
+    max_documents_per_file: int | None = None,
+    max_characters_per_file: int | None = None,
+) -> Iterator[str]:
+    documents = 0
+    characters = 0
+    for path in paths:
+        file_documents = 0
+        file_characters = 0
+        for text in iter_texts(path):
+            if max_documents is not None and documents >= max_documents:
+                return
+            if max_documents_per_file is not None and file_documents >= max_documents_per_file:
+                break
+            remaining = None if max_characters is None else max_characters - characters
+            file_remaining = (
+                None
+                if max_characters_per_file is None
+                else max_characters_per_file - file_characters
+            )
+            if remaining is not None and remaining <= 0:
+                return
+            if file_remaining is not None and file_remaining <= 0:
+                break
+            allowed = len(text)
+            if remaining is not None:
+                allowed = min(allowed, remaining)
+            if file_remaining is not None:
+                allowed = min(allowed, file_remaining)
+            text = text[:allowed]
+            if text:
+                yield text
+                documents += 1
+                characters += len(text)
+                file_documents += 1
+                file_characters += len(text)
 
 
 def merge_pair(tokens: tuple[int, ...], pair: tuple[int, int], merged_id: int) -> tuple[int, ...]:
@@ -122,13 +193,31 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=Path("tokenizer/native_english_bpe.json"))
     parser.add_argument("--target-vocab-size", type=int, default=8192)
     parser.add_argument("--min-frequency", type=int, default=2)
+    parser.add_argument(
+        "--max-documents",
+        type=int,
+        help="Optional tokenizer-training record cap for very large corpora.",
+    )
+    parser.add_argument(
+        "--max-characters",
+        type=int,
+        help="Optional tokenizer-training character cap for very large corpora.",
+    )
+    parser.add_argument("--max-documents-per-file", type=int)
+    parser.add_argument("--max-characters-per-file", type=int)
     args = parser.parse_args()
 
     paths = iter_paths(args.input or [Path("data")])
     if not paths:
         raise FileNotFoundError("No tokenizer training files were found.")
     tokenizer = train_bpe(
-        (extract_text(path) for path in paths),
+        limited_texts(
+            paths,
+            max_documents=args.max_documents,
+            max_characters=args.max_characters,
+            max_documents_per_file=args.max_documents_per_file,
+            max_characters_per_file=args.max_characters_per_file,
+        ),
         target_vocab_size=args.target_vocab_size,
         min_frequency=args.min_frequency,
     )
@@ -137,6 +226,10 @@ def main() -> None:
         metadata={
             "target_vocab_size": args.target_vocab_size,
             "min_frequency": args.min_frequency,
+            "max_documents": args.max_documents,
+            "max_characters": args.max_characters,
+            "max_documents_per_file": args.max_documents_per_file,
+            "max_characters_per_file": args.max_characters_per_file,
             "sources": [{"path": path.as_posix(), "sha256": sha256(path)} for path in paths],
         },
     )

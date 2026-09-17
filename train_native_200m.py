@@ -14,7 +14,7 @@ import random
 import time
 from dataclasses import replace
 from pathlib import Path
-from typing import Iterable, Iterator, Mapping, Sequence
+from typing import Iterable, Iterator, Sequence
 
 import torch
 from torch import nn
@@ -26,6 +26,7 @@ from native_200m import (
     SMOKE_CONFIG,
     save_checkpoint,
 )
+from native_data import TrainingRecord, iter_documents
 from native_tokenizer import NativeTokenizer
 
 
@@ -33,9 +34,19 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train NativeEnglishLM-200M from scratch.")
     parser.add_argument("--data", type=Path, default=Path("data"))
     parser.add_argument(
+        "--tokenized-data",
+        type=Path,
+        help="Memory-mapped token manifest created by tokenize_native_data.py.",
+    )
+    parser.add_argument(
         "--validation-data",
         type=Path,
         help="Optional separate validation file or directory.",
+    )
+    parser.add_argument(
+        "--validation-tokenized-data",
+        type=Path,
+        help="Validation token manifest used with --tokenized-data.",
     )
     parser.add_argument(
         "--validation-ratio",
@@ -81,6 +92,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--checkpoint-every", type=int, default=250)
     parser.add_argument("--eval-every", type=int, default=250)
+    parser.add_argument(
+        "--max-eval-batches",
+        type=int,
+        default=200,
+        help="Fixed validation prefix evaluated at each interval.",
+    )
     parser.add_argument("--log-every", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=0)
@@ -110,6 +127,10 @@ def set_seed(seed: int) -> None:
 def validate_args(args: argparse.Namespace) -> None:
     if args.resume is not None and args.init_from is not None:
         raise ValueError("--resume and --init-from cannot be used together.")
+    if args.tokenized_data is None and args.validation_tokenized_data is not None:
+        raise ValueError("--validation-tokenized-data requires --tokenized-data.")
+    if args.tokenized_data is not None and args.validation_data is not None:
+        raise ValueError("Use --validation-tokenized-data with --tokenized-data.")
     positive_values = {
         "--seq-len": args.seq_len,
         "--batch-size": args.batch_size,
@@ -117,6 +138,7 @@ def validate_args(args: argparse.Namespace) -> None:
         "--max-steps": args.max_steps,
         "--checkpoint-every": args.checkpoint_every,
         "--eval-every": args.eval_every,
+        "--max-eval-batches": args.max_eval_batches,
         "--log-every": args.log_every,
     }
     for name, value in positive_values.items():
@@ -152,86 +174,6 @@ def resolve_amp_dtype(device: torch.device, requested: str) -> torch.dtype | Non
     if torch.cuda.is_bf16_supported():
         return torch.bfloat16
     return torch.float16
-
-
-TrainingRecord = str | Sequence[Mapping[str, str]]
-
-
-def _read_json_record(path: Path, line: str) -> TrainingRecord | None:
-    try:
-        record = json.loads(line)
-    except json.JSONDecodeError:
-        return None
-    if isinstance(record, dict):
-        instruction = record.get("instruction")
-        output = record.get("output")
-        if (
-            isinstance(instruction, str)
-            and instruction.strip()
-            and isinstance(output, str)
-            and output.strip()
-        ):
-            return [
-                {"role": "user", "content": instruction.strip()},
-                {"role": "assistant", "content": output.strip()},
-            ]
-        for key in ("text", "content", "prompt", "completion"):
-            value = record.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        messages = record.get("messages")
-        if isinstance(messages, list):
-            normalized_messages: list[dict[str, str]] = []
-            for message in messages:
-                if not isinstance(message, dict):
-                    continue
-                role = {
-                    "human": "user",
-                    "user": "user",
-                    "gpt": "assistant",
-                    "assistant": "assistant",
-                    "system": "system",
-                }.get(str(message.get("role", "unknown")))
-                content = message.get("content")
-                if role and isinstance(content, str) and content.strip():
-                    normalized_messages.append(
-                        {"role": str(role), "content": content.strip()}
-                    )
-            if normalized_messages:
-                return normalized_messages
-    return None
-
-
-def iter_documents(data_path: Path) -> Iterator[TrainingRecord]:
-    paths = [data_path] if data_path.is_file() else sorted(data_path.rglob("*"))
-    supported = {".txt", ".md", ".json", ".jsonl"}
-    for path in paths:
-        if not path.is_file() or path.suffix.lower() not in supported:
-            continue
-        if path.name.lower() in {"manifest.json", "readme.info"}:
-            continue
-        if path.suffix.lower() in {".txt", ".md"}:
-            text = path.read_text(encoding="ascii", errors="strict").strip()
-            if text:
-                yield text
-            continue
-        if path.suffix.lower() == ".json":
-            raw_records = json.loads(path.read_text(encoding="ascii", errors="strict"))
-            if isinstance(raw_records, dict):
-                raw_records = [raw_records]
-            if isinstance(raw_records, list):
-                for raw_record in raw_records:
-                    if isinstance(raw_record, dict):
-                        if record := _read_json_record(
-                            path,
-                            json.dumps(raw_record, ensure_ascii=True),
-                        ):
-                            yield record
-            continue
-        with path.open("r", encoding="ascii", errors="strict") as handle:
-            for line in handle:
-                if record := _read_json_record(path, line):
-                    yield record
 
 
 class PackedTextDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
@@ -300,6 +242,100 @@ class PackedTextDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         return values[:-1], labels
 
 
+class TokenFileDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
+    """Read fixed-length examples from a memory-mapped uint16 token stream."""
+
+    def __init__(
+        self,
+        manifest_path: Path,
+        tokenizer: NativeTokenizer,
+        seq_len: int,
+        require_assistant_mask: bool = False,
+    ) -> None:
+        if seq_len < 2:
+            raise ValueError("seq_len must be at least two.")
+        manifest = json.loads(manifest_path.read_text(encoding="ascii"))
+        if manifest.get("format") != "native-token-binary-v1":
+            raise ValueError(f"Unsupported token manifest: {manifest_path}")
+        if manifest.get("dtype") != "uint16-le":
+            raise ValueError("Only little-endian uint16 token files are supported.")
+        if manifest.get("vocab_size") != tokenizer.vocab_size:
+            raise ValueError("Token data and tokenizer vocabulary sizes do not match.")
+        if manifest.get("tokenizer_fingerprint") != tokenizer.fingerprint():
+            raise ValueError("Token data was created with a different tokenizer.")
+        token_count = int(manifest.get("token_count", 0))
+        if token_count < seq_len + 1:
+            raise ValueError(
+                f"The token file needs at least {seq_len + 1} tokens but contains "
+                f"only {token_count}."
+            )
+        tokens_file = manifest.get("tokens_file")
+        if not isinstance(tokens_file, str):
+            raise ValueError("Token manifest does not name a token file.")
+        tokens_path = manifest_path.parent / tokens_file
+        if not tokens_path.is_file() or tokens_path.stat().st_size != token_count * 2:
+            raise ValueError("Token file is missing or its byte length is invalid.")
+        self.tokens = torch.from_file(
+            str(tokens_path),
+            shared=False,
+            size=token_count,
+            dtype=torch.uint16,
+        )
+        self.loss_mask: torch.Tensor | None = None
+        mask_file = manifest.get("mask_file")
+        if isinstance(mask_file, str):
+            mask_path = manifest_path.parent / mask_file
+            if not mask_path.is_file() or mask_path.stat().st_size != token_count:
+                raise ValueError("Assistant-loss mask is missing or has an invalid length.")
+            self.loss_mask = torch.from_file(
+                str(mask_path),
+                shared=False,
+                size=token_count,
+                dtype=torch.uint8,
+            )
+        if require_assistant_mask and self.loss_mask is None:
+            raise ValueError(
+                "--assistant-only-loss requires token data created with the same option."
+            )
+        if not require_assistant_mask and self.loss_mask is not None:
+            raise ValueError(
+                "Masked token data requires --assistant-only-loss during training."
+            )
+        self.token_count = token_count
+        self.supervised_token_count = int(
+            manifest.get("supervised_token_count", token_count - 1)
+        )
+        self.record_count = int(manifest.get("record_count", 0))
+        self.seq_len = seq_len
+        possible_examples = (token_count - 1) // seq_len
+        self.valid_example_indices: torch.Tensor | None = None
+        if self.loss_mask is not None:
+            target_mask = self.loss_mask[1 : possible_examples * seq_len + 1]
+            valid = target_mask.view(possible_examples, seq_len).bool().any(dim=1)
+            self.valid_example_indices = valid.nonzero(as_tuple=False).flatten()
+            if self.valid_example_indices.numel() == 0:
+                raise ValueError("Token data does not contain supervised assistant targets.")
+        self.possible_examples = possible_examples
+
+    def __len__(self) -> int:
+        if self.valid_example_indices is not None:
+            return int(self.valid_example_indices.numel())
+        return self.possible_examples
+
+    def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
+        if self.valid_example_indices is not None:
+            example_index = int(self.valid_example_indices[index])
+        else:
+            example_index = index
+        start = example_index * self.seq_len
+        values = self.tokens[start : start + self.seq_len + 1].to(torch.long)
+        labels = values[1:].clone()
+        if self.loss_mask is not None:
+            target_mask = self.loss_mask[start + 1 : start + self.seq_len + 1].bool()
+            labels.masked_fill_(~target_mask, -100)
+        return values[:-1], labels
+
+
 def split_documents(
     documents: Sequence[TrainingRecord],
     validation_ratio: float,
@@ -333,6 +369,7 @@ def evaluate(
     loader: DataLoader,
     device: torch.device,
     amp_dtype: torch.dtype | None,
+    max_batches: int,
 ) -> float:
     model.eval()
     total_loss = 0.0
@@ -344,6 +381,8 @@ def evaluate(
             _, loss = model(input_ids, labels)
         total_loss += float(loss.item())
         batches += 1
+        if batches >= max_batches:
+            break
     model.train()
     if batches == 0:
         raise RuntimeError("The validation dataset did not produce any batches.")
@@ -455,33 +494,63 @@ def train(args: argparse.Namespace) -> None:
     device = resolve_device(args.device)
     amp_dtype = resolve_amp_dtype(device, args.dtype)
     tokenizer = NativeTokenizer.load(args.tokenizer)
-    documents = list(iter_documents(args.data))
-    if not documents:
-        if args.require_real_data:
-            raise RuntimeError("No training data was found.")
-        documents = [
-            "This is smoke-test data. Real training requires enough licensed English text."
-        ] * 256
-        print("[warning] No data was found; using repeated smoke-test text.")
-
-    if args.validation_data is not None:
-        validation_documents = list(iter_documents(args.validation_data))
-        if not validation_documents:
-            raise RuntimeError("No validation data was found.")
-        train_documents = documents
-    else:
-        train_documents, validation_documents = split_documents(
-            documents,
-            args.validation_ratio,
-            args.seed,
+    validation_dataset: Dataset[tuple[torch.Tensor, torch.Tensor]] | None = None
+    train_document_count = 0
+    validation_document_count = 0
+    if args.tokenized_data is not None:
+        dataset: Dataset[tuple[torch.Tensor, torch.Tensor]] = TokenFileDataset(
+            args.tokenized_data,
+            tokenizer,
+            args.seq_len,
+            require_assistant_mask=args.assistant_only_loss,
         )
+        train_document_count = dataset.record_count
+        if args.validation_tokenized_data is not None:
+            validation_dataset = TokenFileDataset(
+                args.validation_tokenized_data,
+                tokenizer,
+                min(args.validation_seq_len, args.seq_len),
+                require_assistant_mask=args.assistant_only_loss,
+            )
+            validation_document_count = validation_dataset.record_count
+    else:
+        documents = list(iter_documents(args.data))
+        if not documents:
+            if args.require_real_data:
+                raise RuntimeError("No training data was found.")
+            documents = [
+                "This is smoke-test data. Real training requires enough licensed English text."
+            ] * 256
+            print("[warning] No data was found; using repeated smoke-test text.")
 
-    dataset = PackedTextDataset(
-        train_documents,
-        tokenizer,
-        args.seq_len,
-        assistant_only_loss=args.assistant_only_loss,
-    )
+        if args.validation_data is not None:
+            validation_documents = list(iter_documents(args.validation_data))
+            if not validation_documents:
+                raise RuntimeError("No validation data was found.")
+            train_documents = documents
+        else:
+            train_documents, validation_documents = split_documents(
+                documents,
+                args.validation_ratio,
+                args.seed,
+            )
+
+        dataset = PackedTextDataset(
+            train_documents,
+            tokenizer,
+            args.seq_len,
+            assistant_only_loss=args.assistant_only_loss,
+        )
+        train_document_count = len(train_documents)
+        if validation_documents:
+            validation_seq_len = min(args.validation_seq_len, args.seq_len)
+            validation_dataset = PackedTextDataset(
+                validation_documents,
+                tokenizer,
+                validation_seq_len,
+                assistant_only_loss=args.assistant_only_loss,
+            )
+            validation_document_count = len(validation_documents)
     if len(dataset) == 0:
         raise RuntimeError("The training data did not produce any supervised examples.")
     loader = DataLoader(
@@ -496,15 +565,7 @@ def train(args: argparse.Namespace) -> None:
         raise RuntimeError("The dataset did not produce a complete batch.")
 
     validation_loader: DataLoader | None = None
-    validation_dataset: PackedTextDataset | None = None
-    if validation_documents:
-        validation_seq_len = min(args.validation_seq_len, args.seq_len)
-        validation_dataset = PackedTextDataset(
-            validation_documents,
-            tokenizer,
-            validation_seq_len,
-            assistant_only_loss=args.assistant_only_loss,
-        )
+    if validation_dataset is not None:
         if len(validation_dataset) == 0:
             raise RuntimeError("The validation data did not produce any supervised examples.")
         validation_loader = DataLoader(
@@ -546,10 +607,10 @@ def train(args: argparse.Namespace) -> None:
 
     print(
         f"[info] Training started. device={device}, "
-        f"dtype={amp_dtype or torch.float32}, train_documents={len(train_documents)}, "
+        f"dtype={amp_dtype or torch.float32}, train_documents={train_document_count}, "
         f"train_tokens={dataset.token_count}, supervised_tokens={dataset.supervised_token_count}, "
         f"assistant_only_loss={args.assistant_only_loss}, batches={len(loader)}, "
-        f"validation_documents={len(validation_documents)}, "
+        f"validation_documents={validation_document_count}, "
         f"validation_batches={len(validation_loader) if validation_loader else 0}"
     )
     if args.preset == "native-200m" and dataset.token_count < 100_000_000:
@@ -601,7 +662,13 @@ def train(args: argparse.Namespace) -> None:
             and (step % args.eval_every == 0 or step == args.max_steps)
         )
         if should_evaluate:
-            validation_loss = evaluate(model, validation_loader, device, amp_dtype)
+            validation_loss = evaluate(
+                model,
+                validation_loader,
+                device,
+                amp_dtype,
+                args.max_eval_batches,
+            )
             print(f"[info] step={step} validation_loss={validation_loss:.4f}")
             if best_loss is None or validation_loss < best_loss:
                 best_loss = validation_loss
