@@ -11,6 +11,27 @@ from train_native_200m import PackedTextDataset, split_documents
 from train_native_tokenizer import train_bpe
 
 
+class ScriptedStopModel(NativeCausalLM):
+    def __init__(self, stop_token_id: int) -> None:
+        super().__init__(SMOKE_CONFIG)
+        self.stop_token_id = stop_token_id
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        labels: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        if labels is not None:
+            raise AssertionError("ScriptedStopModel is inference-only.")
+        logits = torch.full(
+            (input_ids.size(0), input_ids.size(1), self.config.vocab_size),
+            -1e9,
+            device=input_ids.device,
+        )
+        logits[:, -1, self.stop_token_id] = 0.0
+        return logits
+
+
 class NativeTokenizerTests(unittest.TestCase):
     def test_english_round_trip_and_bpe_compression(self) -> None:
         text = "English language models should tokenize repeated English words."
@@ -35,6 +56,20 @@ class NativeTokenizerTests(unittest.TestCase):
         self.assertEqual(prompt[-1], tokenizer.assistant_token_id)
         self.assertIn(tokenizer.system_token_id, prompt)
         self.assertIn(tokenizer.user_token_id, prompt)
+
+    def test_assistant_loss_mask_excludes_prompt_tokens(self) -> None:
+        tokenizer = NativeTokenizer()
+        messages = [
+            {"role": "system", "content": "Be helpful."},
+            {"role": "user", "content": "Hello."},
+            {"role": "assistant", "content": "Hello! How can I help?"},
+        ]
+        tokens, loss_mask = tokenizer.encode_chat_with_assistant_mask(messages)
+        assistant_position = tokens.index(tokenizer.assistant_token_id)
+
+        self.assertEqual(len(tokens), len(loss_mask))
+        self.assertFalse(any(loss_mask[: assistant_position + 1]))
+        self.assertTrue(all(loss_mask[assistant_position + 1 :]))
 
 
 class NativeModelTests(unittest.TestCase):
@@ -96,6 +131,36 @@ class NativeModelTests(unittest.TestCase):
         )
         self.assertTrue(torch.allclose(loss, expected))
 
+    def test_assistant_only_dataset_ignores_system_and_user_targets(self) -> None:
+        tokenizer = NativeTokenizer()
+        messages = [
+            {"role": "system", "content": "Be helpful."},
+            {"role": "user", "content": "Hello."},
+            {"role": "assistant", "content": "Hi."},
+        ]
+        encoded, mask = tokenizer.encode_chat_with_assistant_mask(
+            messages,
+            add_bos=False,
+            add_eos=True,
+        )
+        stream = [tokenizer.bos_token_id, *encoded]
+        stream_mask = [False, *mask]
+        dataset = PackedTextDataset(
+            [messages],
+            tokenizer,
+            seq_len=len(stream) - 1,
+            assistant_only_loss=True,
+        )
+        input_ids, labels = dataset[0]
+        expected_labels = torch.tensor(stream[1:], dtype=torch.long)
+        expected_mask = torch.tensor(stream_mask[1:], dtype=torch.bool)
+        expected_labels.masked_fill_(~expected_mask, -100)
+
+        self.assertEqual(input_ids.tolist(), stream[:-1])
+        self.assertEqual(labels.tolist(), expected_labels.tolist())
+        self.assertGreater(int(labels.eq(-100).sum()), 0)
+        self.assertGreater(int(labels.ne(-100).sum()), 0)
+
     def test_document_split_is_deterministic_and_disjoint(self) -> None:
         documents = [f"document-{index}" for index in range(20)]
         first = split_documents(documents, validation_ratio=0.2, seed=42)
@@ -148,6 +213,23 @@ class NativeModelTests(unittest.TestCase):
         )
         generated = set(result[0, prompt.size(1) :].tolist())
         self.assertTrue(generated <= {tokenizer.eos_token_id, *allowed})
+
+    def test_generation_stops_at_chat_turn_end(self) -> None:
+        tokenizer = NativeTokenizer()
+        model = ScriptedStopModel(tokenizer.turn_end_token_id)
+        prompt = torch.tensor([[tokenizer.bos_token_id, tokenizer.user_token_id]])
+        result = model.generate(
+            prompt,
+            max_new_tokens=8,
+            temperature=0.0,
+            top_k=None,
+            top_p=None,
+            allowed_token_ids=[tokenizer.byte_offset + ord("A")],
+            additional_stop_token_ids=[tokenizer.turn_end_token_id],
+        )
+
+        self.assertEqual(result.size(1), prompt.size(1) + 1)
+        self.assertEqual(int(result[0, -1]), tokenizer.turn_end_token_id)
 
 
 if __name__ == "__main__":

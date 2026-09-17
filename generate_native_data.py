@@ -6,6 +6,7 @@ import argparse
 import json
 from pathlib import Path
 
+from generate_native_chat_data import build_generated_chat_records
 from generate_native_corpus import write_pretraining_corpus
 
 
@@ -26,6 +27,14 @@ PASSAGES = [
 ]
 
 SINGLE_TURN = [
+    ("Greeting", "Hello!", "Hello! How can I help you today?"),
+    ("Greeting", "Good morning. How are you?", "Good morning! I am ready to help. What would you like to work on?"),
+    ("Capabilities", "What can you help me with?", "I can explain concepts, help plan tasks, summarize or rewrite text, work through calculations, and assist with programming questions."),
+    ("Clarification", "Can you help me make it better?", "Yes. What are you working on, who is it for, and what would a better result look like?"),
+    ("Thanks", "Thanks, that was helpful.", "You are welcome. If you want, we can also turn the answer into a short checklist or work through the next step."),
+    ("Goodbye", "That is all for now. Goodbye.", "Goodbye! I hope the rest of your day goes well."),
+    ("Correction", "I think the previous answer misunderstood my question.", "Thanks for pointing that out. Please tell me which part I misunderstood, and I will correct the answer based on your intended question."),
+    ("Uncertainty", "Can you guarantee that an unknown future event will happen?", "No. I can discuss available evidence and possible outcomes, but I cannot guarantee an uncertain future event."),
     ("Definition", "Explain a cache in one short paragraph.", "A cache is a temporary copy of data stored closer to where it will be used, making repeated access faster. It needs an expiration or refresh policy because the original data can change."),
     ("Definition", "What is the difference between backup and synchronization?", "A backup is a separate copy intended for recovery. Synchronization keeps current files aligned across locations and may propagate deletions, so synchronization alone is not a backup."),
     ("Math", "What is the price after a 15 percent discount on 120 dollars?", "The discount is 120 times 0.15, which is 18 dollars. The final price is 102 dollars."),
@@ -62,7 +71,7 @@ def make_record(record_id: str, category: str, turns: list[tuple[str, str]]) -> 
     }
 
 
-def build_records() -> list[dict]:
+def build_records(target_count: int, seed: int) -> list[dict]:
     records = [
         make_record(
             f"native-single-{index:04d}",
@@ -74,6 +83,11 @@ def build_records() -> list[dict]:
     records.extend(
         make_record(f"native-multi-{index:04d}", category, turns)
         for index, (category, turns) in enumerate(MULTI_TURN, start=1)
+    )
+    if target_count < len(records):
+        raise ValueError(f"--sft-records must be at least {len(records)}.")
+    records.extend(
+        build_generated_chat_records(target_count - len(records), seed=seed)
     )
     return records
 
@@ -98,9 +112,14 @@ def validate_records(records: list[dict]) -> None:
             message["content"].encode("ascii")
 
 
-def write_outputs(output_dir: Path, pretraining_records: int, seed: int) -> None:
+def write_outputs(
+    output_dir: Path,
+    pretraining_records: int,
+    sft_records: int,
+    seed: int,
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    records = build_records()
+    records = build_records(sft_records, seed)
     validate_records(records)
     sft_path = output_dir / "native_sft_seed.jsonl"
     with sft_path.open("w", encoding="ascii", newline="\n") as handle:
@@ -125,9 +144,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Self-authored English data generator")
     parser.add_argument("--output-dir", type=Path, default=Path("data"))
     parser.add_argument("--pretraining-records", type=int, default=5000)
+    parser.add_argument("--sft-records", type=int, default=6000)
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
-    write_outputs(args.output_dir, args.pretraining_records, args.seed)
+    write_outputs(
+        args.output_dir,
+        pretraining_records=args.pretraining_records,
+        sft_records=args.sft_records,
+        seed=args.seed,
+    )
 
 
 if __name__ == "__main__":

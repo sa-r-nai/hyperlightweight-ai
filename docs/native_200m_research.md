@@ -59,8 +59,10 @@ betas=(0.9, 0.95), linear warmup, and cosine decay. CUDA AMP and gradient
 checkpointing are available. Input positions are paired with their next-token
 targets exactly once. By default, documents are deterministically split into
 training and validation sets, and the best checkpoint is selected using
-held-out validation loss. CPU mode exists for smoke tests but is not a
-practical way to pretrain the full model.
+held-out validation loss. A separate SFT mode masks system and user targets,
+trains assistant response and ending tokens, and can initialize model weights
+from a pretraining checkpoint while starting a fresh optimizer. CPU mode exists
+for smoke tests but is not a practical way to pretrain the full model.
 
 At 201,924,352 parameters, raw model weights require approximately:
 
@@ -98,7 +100,9 @@ Automated tests cover:
 4. the expected 190M-215M parameter range;
 5. causal masking and finite loss;
 6. deterministic generation shape;
-7. output-token filtering.
+7. output-token filtering and chat turn termination;
+8. assistant-only SFT target masking;
+9. deterministic, unique, ASCII-only corpus generation.
 
 Production runs must also track validation loss, perplexity, effective tokens,
 gradient norms, overflow events, checkpoint hashes, tokenizer hash, hardware,
@@ -107,9 +111,10 @@ PyTorch/CUDA versions, and random seeds.
 ## Current limitations
 
 - The included corpus is much too small for useful pretraining.
+- Synthetic conversations have narrower language and topic diversity than
+  real, carefully licensed human conversations.
 - The current loader materializes tokenized data in memory.
 - Generation has no KV cache and recomputes the context for every token.
-- The training loop does not yet apply an assistant-only SFT loss mask.
 - ASCII-only operation excludes accented English names, typographic
   punctuation, mathematical Unicode symbols, and other languages.
 

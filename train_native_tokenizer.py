@@ -48,8 +48,23 @@ def extract_text(path: Path) -> str:
             for item in value:
                 visit(item)
         elif isinstance(value, dict):
-            for item in value.values():
-                visit(item)
+            messages = value.get("messages")
+            if isinstance(messages, list):
+                for message in messages:
+                    if isinstance(message, dict):
+                        visit(message.get("content"))
+                return
+            text_keys = ("text", "content", "instruction", "output", "prompt", "completion")
+            matched = False
+            for key in text_keys:
+                if key in value:
+                    visit(value[key])
+                    matched = True
+            if not matched:
+                ignored_metadata = {"id", "category", "source", "license", "role"}
+                for key, item in value.items():
+                    if key not in ignored_metadata:
+                        visit(item)
 
     if path.suffix.lower() == ".jsonl":
         for line in raw.splitlines():

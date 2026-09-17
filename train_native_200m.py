@@ -85,8 +85,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--grad-checkpointing", action="store_true")
+    parser.add_argument(
+        "--assistant-only-loss",
+        action="store_true",
+        help="For chat records, compute loss only on assistant responses and endings.",
+    )
     parser.add_argument("--require-real-data", action="store_true")
     parser.add_argument("--resume", type=Path)
+    parser.add_argument(
+        "--init-from",
+        type=Path,
+        help="Load model weights only and start a fresh optimizer/schedule, for example for SFT.",
+    )
     return parser.parse_args()
 
 
@@ -98,6 +108,8 @@ def set_seed(seed: int) -> None:
 
 
 def validate_args(args: argparse.Namespace) -> None:
+    if args.resume is not None and args.init_from is not None:
+        raise ValueError("--resume and --init-from cannot be used together.")
     positive_values = {
         "--seq-len": args.seq_len,
         "--batch-size": args.batch_size,
@@ -230,39 +242,62 @@ class PackedTextDataset(Dataset[tuple[torch.Tensor, torch.Tensor]]):
         documents: Iterable[TrainingRecord],
         tokenizer: NativeTokenizer,
         seq_len: int,
+        assistant_only_loss: bool = False,
     ):
         if seq_len < 2:
             raise ValueError("seq_len must be at least two.")
         tokens: list[int] = [tokenizer.bos_token_id]
+        loss_mask: list[bool] = [False]
         for document in documents:
             if isinstance(document, str):
-                tokens.extend(tokenizer.encode(document))
+                encoded = tokenizer.encode(document)
+                tokens.extend(encoded)
+                loss_mask.extend([True] * len(encoded))
                 tokens.append(tokenizer.eos_token_id)
+                loss_mask.append(True)
             else:
-                tokens.extend(
-                    tokenizer.encode_chat(
+                if assistant_only_loss:
+                    encoded, encoded_mask = tokenizer.encode_chat_with_assistant_mask(
                         document,
                         add_bos=False,
                         add_eos=True,
                     )
-                )
+                else:
+                    encoded = tokenizer.encode_chat(
+                        document,
+                        add_bos=False,
+                        add_eos=True,
+                    )
+                    encoded_mask = [True] * len(encoded)
+                tokens.extend(encoded)
+                loss_mask.extend(encoded_mask)
         if len(tokens) < seq_len + 1:
             raise ValueError(
                 f"The dataset needs at least {seq_len + 1} tokens but contains "
                 f"only {len(tokens)}."
             )
         self.tokens = torch.tensor(tokens, dtype=torch.long)
+        self.loss_mask = torch.tensor(loss_mask, dtype=torch.bool)
         self.token_count = len(tokens)
+        self.supervised_token_count = int(self.loss_mask.sum())
         self.seq_len = seq_len
-        self.examples = (len(self.tokens) - 1) // seq_len
+        possible_examples = (len(self.tokens) - 1) // seq_len
+        self.example_starts = [
+            index * seq_len
+            for index in range(possible_examples)
+            if bool(self.loss_mask[index * seq_len + 1 : (index + 1) * seq_len + 1].any())
+        ]
 
     def __len__(self) -> int:
-        return self.examples
+        return len(self.example_starts)
 
     def __getitem__(self, index: int) -> tuple[torch.Tensor, torch.Tensor]:
-        start = index * self.seq_len
+        start = self.example_starts[index]
         values = self.tokens[start : start + self.seq_len + 1]
-        return values[:-1], values[1:]
+        labels = values[1:].clone()
+        target_mask = self.loss_mask[start + 1 : start + self.seq_len + 1]
+        labels.masked_fill_(~target_mask, -100)
+        return values[:-1], labels
 
 
 def split_documents(
@@ -374,6 +409,31 @@ def load_or_create_model(
     args: argparse.Namespace,
     tokenizer: NativeTokenizer,
 ) -> tuple[NativeCausalLM, int, float | None]:
+    checkpoint_path = args.resume or args.init_from
+    if checkpoint_path is not None:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+        if not isinstance(checkpoint, dict) or "model" not in checkpoint:
+            raise ValueError("The checkpoint is invalid.")
+        saved_config = checkpoint.get("config")
+        if not isinstance(saved_config, dict):
+            raise ValueError("The checkpoint does not contain a model configuration.")
+        config = Native200MConfig(**saved_config)
+        if config.vocab_size != tokenizer.vocab_size:
+            raise ValueError("The checkpoint and tokenizer vocabulary sizes do not match.")
+        if args.seq_len > config.max_seq_len:
+            raise ValueError(
+                f"--seq-len {args.seq_len} exceeds the checkpoint context length "
+                f"{config.max_seq_len}."
+            )
+        saved_fingerprint = checkpoint.get("tokenizer_fingerprint")
+        if saved_fingerprint and saved_fingerprint != tokenizer.fingerprint():
+            raise ValueError("The checkpoint was created with a different tokenizer.")
+        model = NativeCausalLM(config)
+        model.load_state_dict(checkpoint["model"])
+        if args.resume is not None:
+            return model, int(checkpoint.get("step", 0)), checkpoint.get("best_loss")
+        return model, 0, None
+
     if args.preset == "smoke":
         config = replace(
             SMOKE_CONFIG,
@@ -386,21 +446,7 @@ def load_or_create_model(
             max_seq_len=args.seq_len,
         )
 
-    model = NativeCausalLM(config)
-    if args.resume is None:
-        return model, 0, None
-
-    checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
-    if not isinstance(checkpoint, dict) or "model" not in checkpoint:
-        raise ValueError("The resume checkpoint is invalid.")
-    saved_config = checkpoint.get("config", {})
-    if saved_config.get("vocab_size") != tokenizer.vocab_size:
-        raise ValueError("The checkpoint and tokenizer vocabulary sizes do not match.")
-    saved_fingerprint = checkpoint.get("tokenizer_fingerprint")
-    if saved_fingerprint and saved_fingerprint != tokenizer.fingerprint():
-        raise ValueError("The checkpoint was created with a different tokenizer.")
-    model.load_state_dict(checkpoint["model"])
-    return model, int(checkpoint.get("step", 0)), checkpoint.get("best_loss")
+    return NativeCausalLM(config), 0, None
 
 
 def train(args: argparse.Namespace) -> None:
@@ -430,7 +476,14 @@ def train(args: argparse.Namespace) -> None:
             args.seed,
         )
 
-    dataset = PackedTextDataset(train_documents, tokenizer, args.seq_len)
+    dataset = PackedTextDataset(
+        train_documents,
+        tokenizer,
+        args.seq_len,
+        assistant_only_loss=args.assistant_only_loss,
+    )
+    if len(dataset) == 0:
+        raise RuntimeError("The training data did not produce any supervised examples.")
     loader = DataLoader(
         dataset,
         batch_size=args.batch_size,
@@ -450,7 +503,10 @@ def train(args: argparse.Namespace) -> None:
             validation_documents,
             tokenizer,
             validation_seq_len,
+            assistant_only_loss=args.assistant_only_loss,
         )
+        if len(validation_dataset) == 0:
+            raise RuntimeError("The validation data did not produce any supervised examples.")
         validation_loader = DataLoader(
             validation_dataset,
             batch_size=args.batch_size,
@@ -491,7 +547,8 @@ def train(args: argparse.Namespace) -> None:
     print(
         f"[info] Training started. device={device}, "
         f"dtype={amp_dtype or torch.float32}, train_documents={len(train_documents)}, "
-        f"train_tokens={dataset.token_count}, batches={len(loader)}, "
+        f"train_tokens={dataset.token_count}, supervised_tokens={dataset.supervised_token_count}, "
+        f"assistant_only_loss={args.assistant_only_loss}, batches={len(loader)}, "
         f"validation_documents={len(validation_documents)}, "
         f"validation_batches={len(validation_loader) if validation_loader else 0}"
     )

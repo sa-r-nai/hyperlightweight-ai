@@ -3,26 +3,26 @@
   "random_seed": 42,
   "validation_ratio": 0.02,
   "record_counts": {
-    "input": 18,
-    "unique": 18,
-    "train": 17,
-    "validation": 1
+    "input": 6000,
+    "unique": 6000,
+    "train": 5880,
+    "validation": 120
   },
   "sources": [
     {
       "path": "data/native_sft_seed.jsonl",
-      "sha256": "fa3acc1646e11f7c1c20b687ff9dd897bbabaf92bda7ca5142f77b26d7443cf4",
+      "sha256": "f6bbb7894c8bc1822e91f5e7018a682ab2755b121f3597baa4e1fcfd9112beb5",
       "license": "self-authored"
     }
   ],
   "outputs": [
     {
       "path": "sft_data/native_sft_train.jsonl",
-      "sha256": "2f006cbf64fd074a1800956b7a5fd627bdfb229e569a9e12790823ad95480cd8"
+      "sha256": "374b3a4fe18529143d59b31f34430f5eefbeb5983752c9b3100eb768e7a906cf"
     },
     {
       "path": "sft_data/native_sft_validation.jsonl",
-      "sha256": "d0fee3a05b7ca060a92baa4d2639d68dd04c857f9b6a4ac23926f34302ee3332"
+      "sha256": "b8b97d6d35717a240859e522dcbf910c6c35055c2a27070a6c305dfc566025e8"
     }
   ],
   "model_relationship": "These records are independent training material. No pretrained model weights or external model tokenizer are included."

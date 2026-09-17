@@ -1,5 +1,5 @@
-# NativeEnglishLM-200M checkpoints are generated locally and are not source files.
-checkpoints_native_200m/
+# NativeEnglishLM checkpoints are generated locally and are not source files.
+checkpoints_native_*/
 artifacts_native_200m/
 __pycache__/
 *.py[cod]

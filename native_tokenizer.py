@@ -152,6 +152,40 @@ class NativeTokenizer:
             result.append(self.eos_token_id)
         return result
 
+    def encode_chat_with_assistant_mask(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        add_bos: bool = True,
+        add_eos: bool = True,
+    ) -> tuple[list[int], list[bool]]:
+        """Encode chat and mark tokens that should contribute to SFT loss."""
+
+        tokens = [self.bos_token_id] if add_bos else []
+        loss_mask = [False] if add_bos else []
+        last_role: str | None = None
+        for message_index, message in enumerate(messages):
+            role = message.get("role")
+            content = message.get("content")
+            if role not in self.role_token_ids:
+                raise ValueError(f"Unsupported message role: {role!r}")
+            if not isinstance(content, str) or not content.strip():
+                raise ValueError("Message content must be a non-empty string.")
+            supervise = role == "assistant"
+            tokens.append(self.role_token_ids[role])
+            loss_mask.append(False)
+            content_tokens = self.encode(content)
+            tokens.extend(content_tokens)
+            loss_mask.extend([supervise] * len(content_tokens))
+            if message_index != len(messages) - 1 or add_eos:
+                tokens.append(self.turn_end_token_id)
+                loss_mask.append(supervise)
+            last_role = str(role)
+        if add_eos:
+            tokens.append(self.eos_token_id)
+            loss_mask.append(last_role == "assistant")
+        return tokens, loss_mask
+
     def encode_generation_prompt(self, messages: Sequence[Mapping[str, str]]) -> list[int]:
         if not messages:
             raise ValueError("A conversation must contain at least one message.")

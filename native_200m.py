@@ -320,6 +320,7 @@ class NativeCausalLM(nn.Module):
         repetition_penalty: float = 1.05,
         eos_token_id: int = NativeTokenizer.eos_token_id,
         allowed_token_ids: Optional[Sequence[int]] = None,
+        additional_stop_token_ids: Optional[Sequence[int]] = None,
     ) -> torch.Tensor:
         """Generate tokens with the same explicit sampling stages as training."""
 
@@ -334,6 +335,10 @@ class NativeCausalLM(nn.Module):
 
         self.eval()
         generated = input_ids
+        stop_token_ids = {
+            eos_token_id,
+            *(additional_stop_token_ids or ()),
+        }
         finished = torch.zeros(
             generated.size(0),
             dtype=torch.bool,
@@ -346,12 +351,14 @@ class NativeCausalLM(nn.Module):
 
             if allowed_token_ids is not None:
                 allowed = torch.zeros_like(logits, dtype=torch.bool)
-                allowed[:, eos_token_id] = True
+                allowed[:, list(stop_token_ids)] = True
                 allowed_ids = torch.tensor(
                     list(allowed_token_ids),
                     device=logits.device,
+                    dtype=torch.long,
                 )
-                allowed[:, allowed_ids] = True
+                if allowed_ids.numel():
+                    allowed[:, allowed_ids] = True
                 logits = logits.masked_fill(~allowed, float("-inf"))
 
             if repetition_penalty != 1.0:
@@ -392,7 +399,10 @@ class NativeCausalLM(nn.Module):
                 next_token,
             )
             generated = torch.cat((generated, next_token), dim=1)
-            finished = finished | next_token.squeeze(-1).eq(eos_token_id)
+            emitted_stop = torch.zeros_like(finished)
+            for stop_token_id in stop_token_ids:
+                emitted_stop |= next_token.squeeze(-1).eq(stop_token_id)
+            finished |= emitted_stop
             if bool(finished.all()):
                 break
 

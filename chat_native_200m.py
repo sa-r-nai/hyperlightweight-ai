@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
         "--system",
         default=(
             "You are a helpful English assistant. Answer accurately, clearly, "
-            "and concisely. Say when you do not know something."
+            "and concisely. State uncertainty instead of inventing facts."
         ),
     )
     parser.add_argument("--max-new-tokens", type=int, default=256)
@@ -61,6 +61,7 @@ def generate_reply(
         top_p=args.top_p,
         repetition_penalty=args.repetition_penalty,
         allowed_token_ids=tokenizer.english_output_token_ids(),
+        additional_stop_token_ids=[tokenizer.turn_end_token_id],
     )[0]
     new_tokens = output_ids[len(prompt) :].tolist()
     return tokenizer.decode(new_tokens).strip()
