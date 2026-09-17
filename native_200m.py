@@ -263,6 +263,8 @@ class NativeCausalLM(nn.Module):
         input_ids: torch.Tensor,
         labels: Optional[torch.Tensor] = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Return logits and, when supplied, loss against aligned next-token labels."""
+
         if input_ids.dim() != 2:
             raise ValueError("input_ids must have shape [batch, sequence].")
         if input_ids.size(1) > self.config.max_seq_len:

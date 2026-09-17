@@ -47,13 +47,15 @@ class NativeModelTests(unittest.TestCase):
         torch.manual_seed(7)
         model = NativeCausalLM(SMOKE_CONFIG)
         model.eval()
-        input_ids = torch.randint(
+        token_ids = torch.randint(
             0,
             SMOKE_CONFIG.vocab_size,
-            (2, 20),
+            (2, 21),
             dtype=torch.long,
         )
-        logits, loss = model(input_ids, input_ids)
+        input_ids = token_ids[:, :-1]
+        labels = token_ids[:, 1:]
+        logits, loss = model(input_ids, labels)
         self.assertEqual(tuple(logits.shape), (2, 20, SMOKE_CONFIG.vocab_size))
         self.assertTrue(torch.isfinite(loss))
 
