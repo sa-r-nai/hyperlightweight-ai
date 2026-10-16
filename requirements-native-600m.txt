@@ -1,0 +1,7 @@
+# Install in a Lightning AI GPU Studio; Python 3.10-3.12 is recommended.
+# No Transformers, PEFT, external model weights, or pretrained vocabulary.
+torch==2.8.0
+numpy==2.2.6
+tokenizers==0.22.1
+datasets==4.1.1
+safetensors==0.6.2

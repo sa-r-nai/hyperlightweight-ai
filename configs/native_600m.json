@@ -1,0 +1,53 @@
+{
+  "name": "NativeKoreanLM-600M",
+  "seed": 42,
+  "system_prompt": "당신은 한국어로 대화하는 친절한 도우미입니다. 사용자의 의도와 앞선 대화를 반영하여 자연스럽고 간결한 한국어로 답하세요. 정보가 부족하면 필요한 내용을 질문하고, 모르는 사실은 추측하여 단정하지 마세요.",
+  "model": {
+    "vocab_size": 32000,
+    "max_seq_len": 2048,
+    "d_model": 1280,
+    "n_layers": 32,
+    "n_heads": 20,
+    "n_kv_heads": 5,
+    "d_ff": 3456,
+    "dropout": 0.0,
+    "rope_theta": 10000.0,
+    "norm_eps": 0.00001,
+    "init_std": 0.02,
+    "tie_embeddings": true
+  },
+  "tokenizer": {"vocab_size": 32000, "max_documents": 200000},
+  "data": {
+    "pretrain_train_documents": 2000000,
+    "pretrain_validation_documents": 10000,
+    "chat_train_records": 100000,
+    "chat_validation_records": 2000,
+    "min_hangul_ratio": 0.7,
+    "min_text_characters": 200,
+    "max_text_characters": 20000
+  },
+  "pretrain": {
+    "target_tokens": 12000000000,
+    "seq_len": 2048,
+    "batch_size": 1,
+    "grad_accumulation": 64,
+    "lr": 0.0003,
+    "min_lr": 0.00003,
+    "warmup_steps": 2000,
+    "eval_every": 1000,
+    "checkpoint_every": 1000,
+    "max_eval_batches": 32
+  },
+  "sft": {
+    "epochs": 2.0,
+    "seq_len": 1024,
+    "batch_size": 1,
+    "grad_accumulation": 32,
+    "lr": 0.00002,
+    "min_lr": 0.000002,
+    "warmup_steps": 100,
+    "eval_every": 200,
+    "checkpoint_every": 200,
+    "max_eval_batches": 32
+  }
+}
