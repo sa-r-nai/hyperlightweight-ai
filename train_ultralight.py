@@ -244,7 +244,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--epochs", type=int, default=1)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=0.1)
-    parser.add_argument("--optimizer", type=str, default="adamw", choices=["adamw", "sgd"])
+    parser.add_argument(
+        "--optimizer",
+        type=str,
+        default="adamw",
+        choices=["adamw", "adafactor", "sgd"],
+        help="Optimizer. Adafactor uses substantially less GPU memory for large models.",
+    )
     parser.add_argument("--warmup-steps", type=int, default=100)
     parser.add_argument("--grad-accum", type=int, default=1)
     parser.add_argument("--val-ratio", type=float, default=0.01)
@@ -254,6 +260,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--init-from", type=str, default="", help="Load only model weights from a checkpoint.")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max-steps", type=int, default=0, help="Optional step limit for quick experiments.")
+    parser.add_argument(
+        "--gradient-checkpointing",
+        action="store_true",
+        help="Recompute each transformer block in backpropagation to reduce activation memory.",
+    )
     parser.add_argument(
         "--require-real-data",
         action="store_true",
@@ -316,12 +327,16 @@ def main() -> None:
         collate_fn=collate_batch,
     )
 
-    model = TinyCausalLM(MODEL_PRESETS[args.preset]).to(device)
+    model = TinyCausalLM(MODEL_PRESETS[args.preset])
+    model.set_gradient_checkpointing(args.gradient_checkpointing)
+    model = model.to(device)
     if args.init_from and not args.resume:
         load_model_weights(Path(args.init_from), model)
         print(f"Initialized model weights from {args.init_from}.")
     if args.optimizer == "adamw":
         optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    elif args.optimizer == "adafactor":
+        optimizer = torch.optim.Adafactor(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     else:
         optimizer = torch.optim.SGD(model.parameters(), lr=args.lr)
 
@@ -358,6 +373,7 @@ def main() -> None:
     print(f"Estimated parameters: {estimate_parameter_count(MODEL_PRESETS[args.preset]) / 1e6:.1f}M")
     print(f"Device: {device}")
     print(f"Optimizer: {args.optimizer}")
+    print(f"Gradient checkpointing: {args.gradient_checkpointing}")
     print(f"Train examples: {len(train_dataset)}")
     print(f"Validation examples: {len(val_dataset)}")
 

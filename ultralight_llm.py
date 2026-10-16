@@ -24,6 +24,7 @@ from typing import List, Optional, Sequence
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 
 class TextPreprocessor:
@@ -327,6 +328,7 @@ class TinyCausalLM(nn.Module):
         self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(config.n_layers)])
         self.final_norm = RMSNorm(config.d_model)
         self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
+        self.gradient_checkpointing = False
 
         self.apply(self._init_weights)
 
@@ -334,6 +336,11 @@ class TinyCausalLM(nn.Module):
             if self.token_emb.weight.shape != self.lm_head.weight.shape:
                 raise ValueError("Embedding and head shapes must match to tie weights.")
             self.lm_head.weight = self.token_emb.weight
+
+    def set_gradient_checkpointing(self, enabled: bool) -> None:
+        """Enable per-block activation checkpointing during training."""
+
+        self.gradient_checkpointing = enabled
 
     @staticmethod
     def _init_weights(module: nn.Module) -> None:
@@ -359,7 +366,10 @@ class TinyCausalLM(nn.Module):
 
         x = self.token_emb(input_ids)
         for block in self.blocks:
-            x = block(x)
+            if self.gradient_checkpointing and self.training:
+                x = checkpoint(block, x, use_reentrant=False)
+            else:
+                x = block(x)
         x = self.final_norm(x)
         logits = self.lm_head(x)
 
