@@ -1,14 +1,6 @@
-# NativeEnglishLM checkpoints are generated locally and are not source files.
-checkpoints_native_*/
-public_data/
-tokenized_data/
-artifacts_native_200m/
+# Native Korean model artifacts and local verification dependencies.
+artifacts_native_600m*/
 __pycache__/
 *.py[cod]
-
-# Korean 600M adaptation artifacts and local verification dependencies.
-artifacts_korean_600m*/
 .venv-verify/
 .cache/
-checkpoints_600m_ko/*.pt
-artifacts_native_600m*/

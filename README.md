@@ -93,5 +93,4 @@ python -m native_600m.chat \
 python -m unittest discover -s tests -p 'test_native_600m_*.py' -v
 ```
 
-이전 영어 200M 및 Qwen 추가 학습 코드는 별도 실험 경로로 보존되어 있습니다.
-현재 기본 실행 명령과 `native_600m/`는 해당 모델을 사용하지 않습니다.
+이 저장소는 자체 한국어 600M 모델의 학습·대화·평가 경로만 포함합니다.
