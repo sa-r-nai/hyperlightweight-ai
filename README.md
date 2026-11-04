@@ -6,13 +6,14 @@
 외부 모델의 가중치·설정·어휘·대화 템플릿을 가져오지 않습니다.
 
 학습 데이터는 공개 한국어 코퍼스와 대화 데이터 또는 자체 JSONL을 사용할 수 있습니다.
-PyTorch, Tokenizers, Datasets는 구현 도구로 사용합니다. 학습 과정은
-**Lightning AI Studio에서만** 실행하며 로컬 PC의 모델·토크나이저 학습을 차단합니다.
+PyTorch, Tokenizers, Datasets는 구현 도구로 사용합니다. 모델 학습은
+**단일 CUDA GPU 환경**에서 실행하며 특정 플랫폼이나 디렉터리에 제한되지 않습니다.
 현재 제공되는 것은 코드와 설정이며 아직 학습된 가중치나 품질 실측값은 없습니다.
 
-## Studio에서 실행
+## 학습 환경에서 실행
 
-Python 3.10~3.12의 단일 CUDA GPU Studio에서 실행합니다.
+Python 3.10~3.12의 단일 CUDA GPU 환경에서 실행합니다.
+Lightning AI Studio 또는 필요한 패키지를 설치한 다른 GPU 환경을 사용할 수 있습니다.
 
 ```bash
 python -m pip install -r requirements-native-600m.txt
@@ -30,7 +31,9 @@ H200이 감지되고 사용 가능한 전체 메모리가 80GiB 이상이면 H20
 대화 품질을 보장하는 수치는 아닙니다. 데이터 준비 이후 실제 토큰 수, 코퍼스 반복
 횟수, 처리 속도를 기록하므로 이를 확인하여 학습 예산을 조정하십시오.
 
-데이터 준비는 CPU Studio에서 먼저 수행할 수 있습니다.
+데이터 준비와 토크나이저 학습은 CPU 환경에서 먼저 수행할 수 있습니다.
+CPU 작업자는 기본 24개이며 `--cpu-workers`로 조정합니다. 문서 필터링·검증·토큰 변환은
+프로세스로 분산하고 토크나이저 어휘 학습은 Rust 스레드를 사용합니다.
 
 ```bash
 python run_native_600m.py --prepare-only
@@ -47,6 +50,19 @@ python run_native_600m.py --reuse-prepared
 ```bash
 python run_native_600m.py --plan
 ```
+
+## Modal에서 실행
+
+`modaltest.py`는 CPU에서 데이터를 준비한 뒤 A100-80GB에서 모델을 학습합니다.
+데이터와 결과는 영구 Volume에 저장하며 자동 재시도는 사용하지 않습니다.
+
+```bash
+python -m pip install -r requirements-modal.txt
+modal setup
+modal run modaltest.py
+```
+
+[전처리 전용 실행, 2 step 시험 실행 및 저장 위치](docs/modal.md)를 참고하십시오.
 
 ## 학습 결과와 대화
 

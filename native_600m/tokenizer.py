@@ -1,16 +1,18 @@
 """Independent byte-level BPE vocabulary and native conversation protocol.
 
-Tokenizer corpus training is restricted to Lightning AI Studio. Importing this
-module, loading a tokenizer, and encoding text never train a tokenizer or model.
+Tokenizer corpus training runs on CPU on any platform. Importing this module,
+loading a tokenizer, and encoding text never train a tokenizer or model.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
+import os
 from collections.abc import Mapping, Sequence
 from pathlib import Path
+
+from .config import DEFAULT_CPU_WORKERS, sha256_file
 
 
 SPECIAL_TOKENS = (
@@ -22,12 +24,16 @@ DEFAULT_TOKENIZER = "artifacts_native_600m/tokenizer/tokenizer.json"
 _ROLE_IDS = {"system": 3, "user": 4, "assistant": 5}
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
+def _sha256(path: Path, *, progress: bool = False) -> str:
+    return sha256_file(path, label="tokenizer-source" if progress else None)
+
+
+def configure_tokenizer_threads(workers: int) -> None:
+    """Configure Rayon's pool before tokenizers performs parallel work."""
+    if type(workers) is not int or workers < 1:
+        raise ValueError("workers must be a positive integer.")
+    os.environ["RAYON_NUM_THREADS"] = str(workers)
+    os.environ["TOKENIZERS_PARALLELISM"] = "true" if workers > 1 else "false"
 
 
 class NativeTokenizer:
@@ -109,6 +115,36 @@ class NativeTokenizer:
     def encode_document(self, text: str) -> list[int]:
         return [self.bos_token_id, *self.encode(text), self.eos_token_id]
 
+    def encode_batch(self, texts: Sequence[str]) -> list[list[int]]:
+        if isinstance(texts, (str, bytes)) or not isinstance(texts, Sequence):
+            raise TypeError("Tokenizer batch input must be a sequence of text strings.")
+        for text in texts:
+            if not isinstance(text, str):
+                raise TypeError("Tokenizer input must be text.")
+            for token in SPECIAL_TOKENS:
+                if token in text:
+                    raise ValueError(f"Text contains reserved protocol marker {token}.")
+        return [encoding.ids for encoding in self._backend.encode_batch(list(texts), add_special_tokens=False)]
+
+    def encode_documents_batch(self, texts: Sequence[str]) -> list[list[int]]:
+        return [[self.bos_token_id, *ids, self.eos_token_id] for ids in self.encode_batch(texts)]
+
+    def encode_chats_batch(self, conversations: Sequence) -> list[tuple[list[int], list[int]]]:
+        checked = [self._messages(messages, training=True) for messages in conversations]
+        contents = iter(self.encode_batch([message["content"] for messages in checked for message in messages]))
+        results = []
+        for messages in checked:
+            ids, mask = [self.bos_token_id], [0]
+            for message in messages:
+                content = next(contents)
+                supervised = int(message["role"] == "assistant")
+                ids.extend([_ROLE_IDS[message["role"]], *content, self.turn_end_token_id])
+                mask.extend([0, *([supervised] * (len(content) + 1))])
+            ids.append(self.eos_token_id)
+            mask.append(0)
+            results.append((ids, mask))
+        return results
+
     @staticmethod
     def _messages(messages: Sequence[Mapping[str, str]], *, training: bool) -> list[dict[str, str]]:
         if isinstance(messages, (str, bytes)) or not isinstance(messages, Sequence) or not messages:
@@ -176,22 +212,20 @@ class NativeTokenizer:
 
 
 def train_tokenizer(input_path: str | Path, output_path: str | Path, *, vocab_size: int = 32000,
-                    max_documents: int = 200000) -> dict:
-    """Train a new vocabulary from UTF-8 JSONL text records inside Studio only."""
-    from .runtime import require_studio
-
-    require_studio()
+                    max_documents: int = 200000, workers: int = DEFAULT_CPU_WORKERS) -> dict:
+    """Train a new vocabulary from UTF-8 JSONL text records on CPU."""
     if type(vocab_size) is not int or vocab_size < 264:
         raise ValueError("vocab_size must be at least 264 (256 bytes, 7 markers, and a learned merge).")
     if type(max_documents) is not int or max_documents < 1:
         raise ValueError("max_documents must be positive.")
+    configure_tokenizer_threads(workers)
     from tokenizers import AddedToken, Tokenizer, __version__, decoders, models, normalizers, pre_tokenizers, trainers
 
     source = Path(input_path)
     destination = Path(output_path)
     if destination.exists():
         raise ValueError("Tokenizer already exists. Use --reuse-prepared or choose a new output path.")
-    source_hash = _sha256(source)
+    source_hash = _sha256(source, progress=True)
     stats = {"documents": 0, "characters": 0}
 
     def records():
@@ -210,6 +244,8 @@ def train_tokenizer(input_path: str | Path, output_path: str | Path, *, vocab_si
                     raise ValueError(f"Reserved chat marker in tokenizer corpus at {source}:{line_number}.")
                 stats["documents"] += 1
                 stats["characters"] += len(text)
+                if stats["documents"] % 10_000 == 0:
+                    print(f"[tokenizer:corpus] documents={stats['documents']:,}/{max_documents:,}", flush=True)
                 yield text
                 if stats["documents"] >= max_documents:
                     break
@@ -225,13 +261,14 @@ def train_tokenizer(input_path: str | Path, output_path: str | Path, *, vocab_si
         initial_alphabet=sorted(pre_tokenizers.ByteLevel.alphabet()),
         special_tokens=[AddedToken(token, normalized=False, special=True) for token in SPECIAL_TOKENS],
     )
+    print(f"[tokenizer:train] threads={workers} max_documents={max_documents:,} vocab_size={vocab_size:,}", flush=True)
     backend.train_from_iterator(records(), trainer=trainer)
     if not stats["documents"] or backend.get_vocab_size() != vocab_size:
         raise ValueError(
             f"Corpus yielded vocabulary size {backend.get_vocab_size()}, below requested {vocab_size}. "
             "Provide more varied Korean pretraining text or increase --max-documents. No tokenizer was saved."
         )
-    if _sha256(source) != source_hash:
+    if _sha256(source, progress=True) != source_hash:
         raise ValueError("Tokenizer source changed during training; retry with an immutable source file.")
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(destination.name + ".partial")
@@ -262,7 +299,7 @@ def validate_prepared_tokenizer(input_path: str | Path, output_path: str | Path,
     source, destination = Path(input_path), Path(output_path)
     manifest = json.loads(destination.with_suffix(".manifest.json").read_text(encoding="utf-8"))
     tokenizer = NativeTokenizer.load(destination)
-    expected = {"initialization": "new_byte_level_bpe", "input_sha256": _sha256(source),
+    expected = {"initialization": "new_byte_level_bpe", "input_sha256": _sha256(source, progress=True),
                 "max_documents": max_documents, "vocab_size": vocab_size,
                 "tokenizer_sha256": tokenizer.fingerprint}
     if any(manifest.get(key) != value for key, value in expected.items()):
@@ -271,22 +308,25 @@ def validate_prepared_tokenizer(input_path: str | Path, output_path: str | Path,
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train an independent Korean BPE tokenizer in Lightning AI Studio.")
+    parser = argparse.ArgumentParser(description="Train an independent Korean BPE tokenizer on CPU.")
     parser.add_argument("--input", required=True, help="UTF-8 JSONL file containing text records.")
     parser.add_argument("--output", default=DEFAULT_TOKENIZER)
     parser.add_argument("--vocab-size", type=int, default=32000)
     parser.add_argument("--max-documents", type=int, default=200000)
+    parser.add_argument("--workers", type=int, default=DEFAULT_CPU_WORKERS, help="Rust threads for BPE vocabulary training")
     parser.add_argument("--reuse-prepared", action="store_true")
     return parser.parse_args(argv)
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
+    configure_tokenizer_threads(args.workers)
     if args.reuse_prepared:
         result = validate_prepared_tokenizer(args.input, args.output, vocab_size=args.vocab_size,
                                             max_documents=args.max_documents)
     else:
-        result = train_tokenizer(args.input, args.output, vocab_size=args.vocab_size, max_documents=args.max_documents)
+        result = train_tokenizer(args.input, args.output, vocab_size=args.vocab_size,
+                                 max_documents=args.max_documents, workers=args.workers)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

@@ -11,8 +11,8 @@ import random
 import time
 
 from .checkpoint import read_checkpoint, save_checkpoint
-from .config import DEFAULT_CONFIG, config_fingerprint, load_config, sha256_file, write_json
-from .runtime import require_studio_cuda
+from .config import DEFAULT_CONFIG, DEFAULT_CPU_WORKERS, config_fingerprint, load_config, sha256_file, write_json
+from .runtime import require_cuda
 from .training_data import TokenWindows
 
 
@@ -24,11 +24,13 @@ def parse_args(argv=None):
     parser.add_argument("--tokenizer", type=Path, default=Path("artifacts_native_600m/tokenizer/tokenizer.json"))
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--init-from", type=Path, help="Required pretrained native checkpoint for SFT only")
-    parser.add_argument("--max-steps", type=int, help="Override budget for a Studio-only execution check")
+    parser.add_argument("--max-steps", type=int, help="Override budget for a short GPU execution check")
     parser.add_argument("--seq-len", type=int)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--grad-accumulation", type=int)
     parser.add_argument("--gpu-profile", choices=("auto", "balanced", "h200"), default="auto")
+    parser.add_argument("--cpu-workers", type=int, default=DEFAULT_CPU_WORKERS,
+                        help="CPU processes for token-artifact validation before training")
     return parser.parse_args(argv)
 
 
@@ -79,8 +81,8 @@ def evaluate(model, dataset, *, batch_size, max_batches, device, dtype):
 
 
 def train(args):
-    # All weight creation and all training remain behind the Studio guard.
-    torch = require_studio_cuda()
+    # Check CUDA availability before creating model weights or starting training.
+    torch = require_cuda()
     from .model import ModelConfig, NativeLM, parameter_count
     from .tokenizer import NativeTokenizer
     from .tokenize import validate_tokenized
@@ -91,7 +93,7 @@ def train(args):
     tokenizer = NativeTokenizer.load(args.tokenizer)
     if tokenizer.vocab_size != config["model"]["vocab_size"]:
         raise ValueError("Tokenizer vocabulary must match the native model configuration.")
-    manifest = validate_tokenized(args.tokens_dir, config, tokenizer=tokenizer)
+    manifest = validate_tokenized(args.tokens_dir, config, tokenizer=tokenizer, workers=args.cpu_workers)
     stage_prefix = "pretrain" if args.stage == "pretrain" else "chat"
     train_data = TokenWindows(args.tokens_dir, manifest["outputs"][f"{stage_prefix}_train"], options["seq_len"])
     validation = TokenWindows(args.tokens_dir, manifest["outputs"][f"{stage_prefix}_validation"], options["seq_len"])

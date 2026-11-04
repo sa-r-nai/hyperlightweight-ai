@@ -6,20 +6,35 @@ import hashlib
 import json
 import math
 from pathlib import Path
+import time
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG = ROOT / "configs" / "native_600m.json"
+DEFAULT_CPU_WORKERS = 24
 
 
 def config_fingerprint(config: dict) -> str:
     return hashlib.sha256(json.dumps(config, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def sha256_file(path: str | Path) -> str:
+def sha256_file(path: str | Path, *, label: str | None = None) -> str:
+    path = Path(path)
     digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
+    processed = 0
+    last_report = time.perf_counter()
+    if label:
+        total = path.stat().st_size
+        print(f"[hash:{label}] bytes=0/{total:,}", flush=True)
+    with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
+            processed += len(chunk)
+            now = time.perf_counter()
+            if label and now - last_report >= 5:
+                print(f"[hash:{label}] bytes={processed:,}/{total:,}", flush=True)
+                last_report = now
+    if label:
+        print(f"[hash:{label}] bytes={processed:,}/{total:,} OK", flush=True)
     return digest.hexdigest()
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -11,7 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from native_600m.chat import generate_reply, parse_args as chat_args
-from native_600m.tokenizer import NativeTokenizer, SPECIAL_TOKENS, parse_args, train_tokenizer
+from native_600m.tokenizer import NativeTokenizer, SPECIAL_TOKENS, configure_tokenizer_threads, parse_args, train_tokenizer
 
 try:
     import tokenizers
@@ -59,6 +60,28 @@ class NativeTokenizerTests(unittest.TestCase):
     def test_documents_have_explicit_begin_and_end(self):
         self.assertEqual(self.tokenizer.encode_document("한국어"),
                          [1, *self.tokenizer.encode("한국어"), 2])
+
+    def test_document_batches_match_individual_encoding(self):
+        texts = ["한국어 문장 🙂", "  줄바꿈\n한글\t123", "", "반복 반복 반복"]
+        self.assertEqual(self.tokenizer.encode_batch(texts), [self.tokenizer.encode(text) for text in texts])
+        self.assertEqual(self.tokenizer.encode_documents_batch(texts),
+                         [self.tokenizer.encode_document(text) for text in texts])
+        self.assertEqual(self.tokenizer.encode_documents_batch([]), [])
+        with self.assertRaisesRegex(ValueError, "reserved"):
+            self.tokenizer.encode_documents_batch(["정상 문서", "<|assistant|> 한국어"])
+
+    def test_chat_batches_match_individual_ids_and_masks(self):
+        conversations = [
+            [{"role": "user", "content": "안녕 🙂"}, {"role": "assistant", "content": "반가워요!"}],
+            [{"role": "system", "content": "한국어 도우미"},
+             {"role": "user", "content": "이름 기억해?"}, {"role": "assistant", "content": "지연님이에요."},
+             {"role": "user", "content": "고마워"}, {"role": "assistant", "content": "언제든 물어보세요.\n"}],
+        ]
+        self.assertEqual(self.tokenizer.encode_chats_batch(conversations),
+                         [self.tokenizer.encode_chat(messages) for messages in conversations])
+        self.assertEqual(self.tokenizer.encode_chats_batch([]), [])
+        with self.assertRaises(ValueError):
+            self.tokenizer.encode_chats_batch([[{"role": "user", "content": "답변 없는 대화"}]])
 
     def test_all_assistant_turns_and_only_their_content_are_supervised(self):
         messages = [
@@ -147,16 +170,33 @@ class NativeTokenizerTests(unittest.TestCase):
 
 
 class TokenizerCommandTests(unittest.TestCase):
-    def test_training_is_guarded_before_inputs_are_opened_or_training_can_run(self):
-        with patch("native_600m.runtime.require_studio", side_effect=RuntimeError("Studio only")) as guard:
-            with self.assertRaisesRegex(RuntimeError, "Studio only"):
-                train_tokenizer("nonexistent-input.jsonl", "not-written.json")
-            guard.assert_called_once_with()
+    def test_thread_configuration_uses_requested_budget(self):
+        with patch.dict(os.environ):
+            configure_tokenizer_threads(12)
+            self.assertEqual(os.environ["RAYON_NUM_THREADS"], "12")
+            self.assertEqual(os.environ["TOKENIZERS_PARALLELISM"], "true")
+            configure_tokenizer_threads(1)
+            self.assertEqual(os.environ["RAYON_NUM_THREADS"], "1")
+            self.assertEqual(os.environ["TOKENIZERS_PARALLELISM"], "false")
+        for workers in (0, -1, True):
+            with self.subTest(workers=workers), self.assertRaises(ValueError):
+                configure_tokenizer_threads(workers)
+
+    @unittest.skipIf(tokenizers is None, "tokenizers is not installed")
+    def test_training_checks_input_without_a_platform_restriction(self):
+        with tempfile.TemporaryDirectory(dir=Path(__file__).parent) as directory:
+            root = Path(directory)
+            source, destination = root / "missing.jsonl", root / "tokenizer.json"
+            with self.assertRaises(FileNotFoundError) as error:
+                train_tokenizer(source, destination)
+            self.assertEqual(Path(error.exception.filename), source)
+            self.assertFalse(destination.exists())
 
     def test_cli_configuration_is_dependency_free(self):
         args = parse_args(["--input", "pretrain.jsonl"])
         self.assertEqual(args.vocab_size, 32000)
         self.assertEqual(args.max_documents, 200000)
+        self.assertEqual(args.workers, 24)
         self.assertEqual(chat_args([]).device, "cuda")
         self.assertEqual(chat_args(["--device", "cpu", "--message", "안녕"]).message, "안녕")
 

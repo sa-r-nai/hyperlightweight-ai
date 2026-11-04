@@ -1,1 +1,1 @@
-"""Independent Korean language model, tokenizer, and cloud training workflow."""
+"""Independent Korean language model, tokenizer, and training workflow."""

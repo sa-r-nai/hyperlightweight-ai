@@ -8,17 +8,21 @@ CommonCrawl terms. The conversation publisher specifies Apache-2.0.
 from __future__ import annotations
 
 import argparse
-from collections import Counter
+from collections import Counter, deque
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from contextlib import nullcontext
 import hashlib
 from itertools import islice
 import json
+import multiprocessing
 from pathlib import Path
 import random
 import re
+import time
 from typing import Iterable, Iterator, Mapping
 import unicodedata
 
-from .config import config_fingerprint, load_config, sha256_file, write_json
+from .config import DEFAULT_CPU_WORKERS, config_fingerprint, load_config, sha256_file, write_json
 
 PRETRAIN_DATASET_ID = "HuggingFaceFW/fineweb-2"
 PRETRAIN_DATASET_REVISION = "af9c13333eb981300149d5ca60a8e9d659b276b9"
@@ -63,7 +67,8 @@ def normalize_text(value: object, config: Mapping, *, document: bool = False) ->
     if any(unicodedata.category(character) in {"Cc", "Cf", "Cs"}
            and character not in "\n\r\t" for character in value):
         raise RejectedRecord("control_characters")
-    if any(marker.casefold() in value.casefold() for marker in TEMPLATE_MARKERS):
+    folded = value.casefold()
+    if any(marker.casefold() in folded for marker in TEMPLATE_MARKERS):
         raise RejectedRecord("template_or_reasoning")
     if REASONING_HEADER.search(value):
         raise RejectedRecord("template_or_reasoning")
@@ -175,12 +180,10 @@ def iter_source(source: Mapping) -> Iterator[object]:
                     except json.JSONDecodeError:
                         yield None
         return
-    from .runtime import require_studio
-    require_studio()
     try:
         from datasets import load_dataset
     except ImportError as error:
-        raise RuntimeError("Install requirements-native-600m.txt in Lightning AI Studio first.") from error
+        raise RuntimeError("Install requirements-native-600m.txt before downloading datasets.") from error
     kwargs = {"revision": source["revision"], "split": source["split"], "streaming": True}
     if "config" in source:
         kwargs["name"] = source["config"]
@@ -195,30 +198,93 @@ def quotas_for(config: Mapping, stage: str) -> dict[str, int]:
     return result
 
 
+def _normalize_record(record: object, config: dict, stage: str) -> tuple:
+    """Return serialized text, its deduplication key, or a rejection reason."""
+    try:
+        if not isinstance(record, Mapping):
+            raise RejectedRecord("invalid_record")
+        if stage == "pretrain":
+            normalized = {"text": normalize_text(record.get("text"), config, document=True)}
+            group = document_group(normalized["text"])
+        else:
+            normalized = {"messages": normalize_messages(record.get("messages"), config)}
+            group = prompt_group(normalized["messages"])
+        return _canonical(normalized), group, None
+    except RejectedRecord as error:
+        return None, None, error.reason
+
+
+def _normalize_batch(records: list, config: dict, stage: str) -> list:
+    return [_normalize_record(record, config, stage) for record in records]
+
+
+def _batches(records: Iterable, size: int = 64) -> Iterator[list]:
+    iterator = iter(records)
+    while batch := list(islice(iterator, size)):
+        yield batch
+
+
+def _ordered_batches(pool, function, batches: Iterable[list], workers: int, *args) -> Iterator:
+    """Bound submitted work and consume results in input order."""
+    if pool is None:
+        for batch in batches:
+            yield function(batch, *args)
+        return
+    iterator = iter(batches)
+    pending = deque()
+
+    def submit_batch():
+        batch = next(iterator, None)
+        if batch is not None:
+            pending.append(pool.submit(function, batch, *args))
+
+    try:
+        for _ in range(workers * 2):
+            submit_batch()
+        while pending:
+            yield pending.popleft().result()
+            submit_batch()
+    finally:
+        for future in pending:
+            future.cancel()
+
+
+def _normalized_records(records: Iterable[object], config: dict, stage: str, workers: int) -> Iterator[tuple]:
+    if workers == 1:
+        for record in records:
+            yield _normalize_record(record, config, stage)
+        return
+    # Bound both input prefetch and completed results; Executor.map on Python
+    # 3.11 would eagerly consume an entire streaming corpus.
+    with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:
+        results = _ordered_batches(pool, _normalize_batch, _batches(records), workers, config, stage)
+        try:
+            for batch in results:
+                yield from batch
+        finally:
+            results.close()
+
+
 def _prepare_stage(records: Iterable[object], output_dir: Path, config: dict, stage: str,
-                   max_scanned_records: int, shuffle_buffer_size: int) -> tuple[dict, dict]:
+                   max_scanned_records: int, shuffle_buffer_size: int, workers: int) -> tuple[dict, dict]:
     quotas = quotas_for(config, stage)
     paths = {split: output_dir / f"{stage}_{split}.jsonl" for split in quotas}
     temporaries = {split: path.with_suffix(".jsonl.tmp") for split, path in paths.items()}
     counts, rejected = Counter(), Counter()
     groups = set()
     scanned = 0
+    shuffled = buffered_shuffle(islice(records, max_scanned_records), seed=config["seed"],
+                                buffer_size=shuffle_buffer_size)
+    normalized_records = _normalized_records(shuffled, config, stage, workers)
     try:
         with temporaries["train"].open("w", encoding="utf-8", newline="\n") as train, \
              temporaries["validation"].open("w", encoding="utf-8", newline="\n") as validation:
             handles = {"train": train, "validation": validation}
-            for record in buffered_shuffle(islice(records, max_scanned_records), seed=config["seed"],
-                                           buffer_size=shuffle_buffer_size):
+            for serialized, group, reason in normalized_records:
                 scanned += 1
                 try:
-                    if not isinstance(record, Mapping):
-                        raise RejectedRecord("invalid_record")
-                    if stage == "pretrain":
-                        normalized = {"text": normalize_text(record.get("text"), config, document=True)}
-                        group = document_group(normalized["text"])
-                    else:
-                        normalized = {"messages": normalize_messages(record.get("messages"), config)}
-                        group = prompt_group(normalized["messages"])
+                    if reason is not None:
+                        raise RejectedRecord(reason)
                     if group in groups:
                         raise RejectedRecord("duplicate_document" if stage == "pretrain" else "duplicate_first_prompt")
                     groups.add(group)
@@ -229,7 +295,7 @@ def _prepare_stage(records: Iterable[object], output_dir: Path, config: dict, st
                 except RejectedRecord as error:
                     rejected[error.reason] += 1
                 else:
-                    handles[split].write(_canonical(normalized) + "\n")
+                    handles[split].write(serialized + "\n")
                     counts[split] += 1
                 if scanned % 10_000 == 0:
                     print(f"[prepare:{stage}] scanned={scanned:,} train={counts['train']:,} "
@@ -248,17 +314,19 @@ def _prepare_stage(records: Iterable[object], output_dir: Path, config: dict, st
                       "rejected_records": sum(rejected.values()), "rejections": dict(rejected)}
         return outputs, statistics
     finally:
+        normalized_records.close()
         for path in temporaries.values():
             path.unlink(missing_ok=True)
 
 
 def prepare_records(pretrain_records: Iterable[object], chat_records: Iterable[object], output_dir: Path,
                     config: dict, *, sources: dict, max_pretrain_scanned: int = 20_000_000,
-                    max_chat_scanned: int = 2_000_000, shuffle_buffer_size: int = SHUFFLE_BUFFER_SIZE) -> dict:
+                    max_chat_scanned: int = 2_000_000, shuffle_buffer_size: int = SHUFFLE_BUFFER_SIZE,
+                    workers: int = 1) -> dict:
     """Publish a completion manifest only after both exact-size stages succeed."""
-    for value in (max_pretrain_scanned, max_chat_scanned, shuffle_buffer_size):
+    for value in (max_pretrain_scanned, max_chat_scanned, shuffle_buffer_size, workers):
         if type(value) is not int or value <= 0:
-            raise ValueError("Scan limits and shuffle buffer size must be positive integers.")
+            raise ValueError("Scan limits, shuffle buffer size, and workers must be positive integers.")
     for stage in ("pretrain", "chat"):
         quotas_for(config, stage)
         _validate_source(sources.get(stage), stage)
@@ -269,7 +337,8 @@ def prepare_records(pretrain_records: Iterable[object], chat_records: Iterable[o
     outputs, statistics = {}, {}
     for stage, records, limit in (("pretrain", pretrain_records, max_pretrain_scanned),
                                   ("chat", chat_records, max_chat_scanned)):
-        entries, stats = _prepare_stage(records, output_dir, config, stage, limit, shuffle_buffer_size)
+        print(f"[prepare:{stage}] workers={workers}", flush=True)
+        entries, stats = _prepare_stage(records, output_dir, config, stage, limit, shuffle_buffer_size, workers)
         outputs.update(entries)
         statistics[stage] = stats
     manifest = {"format": MANIFEST_FORMAT, "config_fingerprint": config_fingerprint(config), "sources": sources,
@@ -299,7 +368,36 @@ def _validate_source(source: object, stage: str) -> None:
         raise ValueError("Unsupported data source kind.")
 
 
-def validate_prepared(output_dir: Path, config: dict) -> dict:
+def _validate_lines(lines: list[str], config: dict, stage: str, split: str, quotas: dict) -> list[str]:
+    """Check a bounded batch in a worker; global duplicate checks stay in the parent."""
+    groups = []
+    for line in lines:
+        row = json.loads(line)
+        if not isinstance(row, Mapping):
+            raise ValueError("A prepared row must be an object.")
+        if stage == "pretrain":
+            normalized = {"text": normalize_text(row.get("text"), config, document=True)}
+            group = document_group(normalized["text"])
+        else:
+            normalized = {"messages": normalize_messages(row.get("messages"), config)}
+            group = prompt_group(normalized["messages"])
+        if row != normalized:
+            raise ValueError(f"Unnormalized or duplicate {stage} data within or across splits.")
+        if split_for_group(group, seed=config["seed"], train_records=quotas["train"],
+                           validation_records=quotas["validation"]) != split:
+            raise ValueError(f"Incorrect deterministic {stage} split.")
+        groups.append(group)
+    return groups
+
+
+def _prepared_file_digest(path: Path, name: str) -> str:
+    """Hash a file with periodic byte progress for slow remote storage."""
+    return sha256_file(path, label=name)
+
+
+def validate_prepared(output_dir: Path, config: dict, *, workers: int = 1) -> dict:
+    if type(workers) is not int or workers < 1:
+        raise ValueError("workers must be a positive integer.")
     output_dir = Path(output_dir)
     path = output_dir / "manifest.json"
     if not path.is_file():
@@ -309,44 +407,68 @@ def validate_prepared(output_dir: Path, config: dict) -> dict:
         raise ValueError("Unsupported data manifest format.")
     if manifest.get("config_fingerprint") != config_fingerprint(config):
         raise ValueError("Prepared data uses a different configuration.")
+    files = []
     for stage in ("pretrain", "chat"):
         _validate_source(manifest.get("sources", {}).get(stage), stage)
         quotas = quotas_for(config, stage)
-        groups = set()
         for split, quota in quotas.items():
             name = f"{stage}_{split}"
             entry = manifest.get("outputs", {}).get(name)
             if not isinstance(entry, dict) or entry.get("file") != f"{name}.jsonl" or entry.get("records") != quota:
                 raise ValueError(f"Invalid {name} output metadata.")
             data_path = output_dir / entry["file"]
-            if not data_path.is_file() or sha256_file(data_path) != entry.get("sha256"):
+            if not data_path.is_file():
                 raise ValueError(f"Prepared {name} hash mismatch.")
+            files.append((stage, split, quota, name, data_path, entry))
+    hash_workers = min(workers, len(files))
+    print(f"[verify:data] hashing files={len(files)} workers={hash_workers}", flush=True)
+    # Large hashlib updates release the GIL, so files can be hashed in threads.
+    with ThreadPoolExecutor(max_workers=hash_workers) as pool:
+        checks = {pool.submit(_prepared_file_digest, path, name): (name, entry)
+                  for _, _, _, name, path, entry in files}
+        for future in as_completed(checks):
+            name, entry = checks[future]
+            if future.result() != entry.get("sha256"):
+                raise ValueError(f"Prepared {name} hash mismatch.")
+            print(f"[verify:{name}] hash OK", flush=True)
+    executor = (ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"))
+                if workers > 1 else nullcontext(None))
+    with executor as pool:
+        groups = set()
+        previous_stage = None
+        for stage, split, quota, name, data_path, _ in files:
+            if stage != previous_stage:
+                groups.clear()
+                previous_stage = stage
+            quotas = quotas_for(config, stage)
             count = 0
+            last_report = 0
+            started = time.perf_counter()
+            print(f"[verify:{name}] records=0/{quota:,} workers={workers}", flush=True)
             with data_path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    row = json.loads(line)
-                    if not isinstance(row, Mapping):
-                        raise ValueError("A prepared row must be an object.")
-                    if stage == "pretrain":
-                        normalized = {"text": normalize_text(row.get("text"), config, document=True)}
-                        group = document_group(normalized["text"])
-                    else:
-                        normalized = {"messages": normalize_messages(row.get("messages"), config)}
-                        group = prompt_group(normalized["messages"])
-                    if row != normalized or group in groups:
-                        raise ValueError(f"Unnormalized or duplicate {stage} data within or across splits.")
-                    if split_for_group(group, seed=config["seed"], train_records=quotas["train"],
-                                       validation_records=quotas["validation"]) != split:
-                        raise ValueError(f"Incorrect deterministic {stage} split.")
-                    groups.add(group)
-                    count += 1
+                results = _ordered_batches(pool, _validate_lines, _batches(handle), workers,
+                                           config, stage, split, quotas)
+                try:
+                    for batch in results:
+                        for group in batch:
+                            if group in groups:
+                                raise ValueError(f"Unnormalized or duplicate {stage} data within or across splits.")
+                            groups.add(group)
+                        count += len(batch)
+                        if count - last_report >= 10_000:
+                            elapsed = max(time.perf_counter() - started, 1e-6)
+                            print(f"[verify:{name}] records={count:,}/{quota:,} records/s={count / elapsed:.0f}", flush=True)
+                            last_report = count
+                finally:
+                    results.close()
             if count != quota:
                 raise ValueError(f"Prepared {name} row count mismatch.")
+            print(f"[verify:{name}] records={count:,}/{quota:,} OK", flush=True)
     return manifest
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Prepare independent Korean model data in Lightning AI Studio.")
+    parser = argparse.ArgumentParser(description="Prepare independent Korean model data.")
     parser.add_argument("--config", type=Path)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--local-pretrain-jsonl", type=Path)
@@ -355,6 +477,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--chat-license")
     parser.add_argument("--max-pretrain-scanned", type=int, default=20_000_000)
     parser.add_argument("--max-chat-scanned", type=int, default=2_000_000)
+    parser.add_argument("--workers", type=int, default=DEFAULT_CPU_WORKERS,
+                        help="CPU processes for data preparation and reuse validation")
     parser.add_argument("--reuse-prepared", action="store_true")
     return parser.parse_args(argv)
 
@@ -369,14 +493,14 @@ def main(argv: list[str] | None = None) -> None:
             raise ValueError(f"--{stage}-license requires --local-{stage}-jsonl.")
         sources[stage] = local_source(path, license_name) if path else public_source(stage)
     if args.reuse_prepared:
-        manifest = validate_prepared(args.output_dir, config)
+        manifest = validate_prepared(args.output_dir, config, workers=args.workers)
         if manifest["sources"] != sources:
             raise ValueError("Prepared data uses different sources; omit --reuse-prepared.")
         print(f"[prepare] Verified existing data: {args.output_dir}")
         return
     prepare_records(iter_source(sources["pretrain"]), iter_source(sources["chat"]), args.output_dir, config,
                     sources=sources, max_pretrain_scanned=args.max_pretrain_scanned,
-                    max_chat_scanned=args.max_chat_scanned)
+                    max_chat_scanned=args.max_chat_scanned, workers=args.workers)
     print(f"[prepare] Wrote both Korean data stages: {args.output_dir}")
 
 

@@ -15,7 +15,7 @@ import torch
 from native_600m.checkpoint import load_model, read_checkpoint, save_checkpoint
 from native_600m.config import load_config, sha256_file
 from native_600m.model import ModelConfig, NativeLM
-from native_600m.runtime import require_studio
+from native_600m.runtime import require_cuda
 from native_600m.train import learning_rate, stage_options
 from native_600m.training_data import TokenWindows, sample_index
 from run_native_600m import build_commands, parse_args
@@ -111,17 +111,49 @@ class WorkflowTests(unittest.TestCase):
             parsers[command[2]](command[3:])
             self.assertNotIn("Qwen", " ".join(command))
 
-    def test_studio_guard_precedes_every_model_or_tokenizer_training_action(self):
-        from native_600m.tokenizer import train_tokenizer
+    def test_preparation_worker_setting_is_forwarded_and_validated(self):
+        from native_600m.prepare import parse_args as prepare_args
+        from native_600m.tokenize import parse_args as tokenize_args
+        from native_600m.tokenizer import parse_args as tokenizer_args
+        from native_600m.train import parse_args as train_args
+
+        commands = build_commands(parse_args(["--plan", "--cpu-workers", "24"]))
+        self.assertEqual(parse_args([]).prepare_workers, 24)
+        self.assertEqual(prepare_args(commands[0][3:]).workers, 24)
+        self.assertEqual(tokenizer_args(commands[1][3:]).workers, 24)
+        self.assertEqual(tokenize_args(commands[2][3:]).workers, 24)
+        self.assertEqual(train_args(commands[3][3:]).cpu_workers, 24)
+        self.assertEqual(train_args(commands[4][3:]).cpu_workers, 24)
+        self.assertEqual(parse_args(["--prepare-workers", "3"]).prepare_workers, 3)
+        for workers in ("0", "-1"):
+            with self.subTest(workers=workers), self.assertRaisesRegex(ValueError, "prepare-workers"):
+                build_commands(parse_args(["--plan", "--prepare-workers", workers]))
+
+    def test_cuda_guard_precedes_model_training(self):
         from native_600m.train import parse_args as train_args, train
 
-        with patch("native_600m.runtime.Path.is_dir", return_value=False):
-            with self.assertRaisesRegex(RuntimeError, "Local training is disabled"):
-                require_studio()
-            with self.assertRaisesRegex(RuntimeError, "Local training is disabled"):
-                train_tokenizer("does-not-exist", "does-not-exist")
-            with self.assertRaisesRegex(RuntimeError, "Local training is disabled"):
+        with patch("torch.cuda.is_available", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "available CUDA GPU"):
                 train(train_args(["--stage", "pretrain", "--output-dir", "unused"]))
+
+    def test_cuda_guard_requires_one_visible_gpu_on_any_platform(self):
+        with patch("torch.cuda.is_available", return_value=True):
+            for count in (0, 2):
+                with self.subTest(count=count), patch("torch.cuda.device_count", return_value=count):
+                    with self.assertRaisesRegex(RuntimeError, "one visible GPU"):
+                        require_cuda()
+            with patch("torch.cuda.device_count", return_value=1):
+                self.assertIs(require_cuda(), torch)
+
+    def test_prepare_only_runs_without_cuda(self):
+        from run_native_600m import main
+
+        with patch("sys.argv", ["run_native_600m.py", "--prepare-only"]), \
+             patch("run_native_600m.require_cuda", side_effect=AssertionError("CUDA is not needed")), \
+             patch("run_native_600m.subprocess.run") as run:
+            main()
+        self.assertEqual([call.args[0][2] for call in run.call_args_list],
+                         ["native_600m.prepare", "native_600m.tokenizer", "native_600m.tokenize"])
 
     def test_learning_rate_reaches_peak_and_final_minimum(self):
         rates = [learning_rate(step, 10, 0.001, 0.0001, 2) for step in range(10)]

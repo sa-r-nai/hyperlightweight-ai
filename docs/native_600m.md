@@ -15,7 +15,7 @@ RoPE, RMSNorm, SwiGLU, 공유 입출력 임베딩입니다. 어휘 32,000개일 
 
 ## H200 및 GPU 설정
 
-H200의 명목 메모리는 141GB입니다. 실제 Studio에서 할당된 메모리는 실행 시
+H200의 명목 메모리는 141GB입니다. 실행 환경에서 할당된 실제 메모리는 실행 시
 직접 확인하십시오. 자동 프로필은 GPU 이름에 H200이 포함되고 메모리가 80GiB
 이상일 때만 선택하므로 작은 MIG 할당에는 기본 프로필을 사용합니다.
 
@@ -32,9 +32,10 @@ H200 설정은 검증할 시작 구성이며 실제 최고 처리 속도나 메�
 
 ## 실행 및 저장 공간
 
-Python 3.10~3.12의 Lightning AI Studio에서 저장소를 열고 실행합니다.
-`/teamspace/studios`와 CUDA를 검사하므로 로컬 PC에서 모델 학습이 시작되지 않습니다.
-토크나이저 학습에도 Studio 검사를 적용합니다.
+Python 3.10~3.12의 학습 환경에서 저장소를 열고 실행합니다.
+Lightning AI Studio와 다른 GPU 서버, 로컬 CUDA 환경을 사용할 수 있습니다.
+특정 플랫폼이나 디렉터리를 검사하지 않으며 모델 학습에는 단일 CUDA GPU가 필요합니다.
+데이터 준비와 토크나이저 학습은 CPU 환경에서 실행할 수 있습니다.
 
 ```bash
 python -m pip install -r requirements-native-600m.txt
@@ -42,15 +43,23 @@ python run_native_600m.py --plan
 python run_native_600m.py
 ```
 
-CPU Studio에서 전처리한 뒤 GPU로 전환하면 준비 중 GPU 사용 시간을 줄일 수 있습니다.
+CPU 환경에서 전처리한 뒤 GPU로 전환하면 준비 중 GPU 사용 시간을 줄일 수 있습니다.
+CPU 작업자 수는 `--cpu-workers`로 지정하며 기존 `--prepare-workers`도 같은 옵션으로 지원합니다.
+명령행 기본값과 Modal 실행기는 24를 사용합니다. 문서 필터링·검증·실제 토큰 변환에
+적용하며, BPE 어휘 학습에는 같은 수의 Rust 스레드를 사용합니다. 메모리는 스트리밍과 제한된 작업
+버퍼로 관리하므로 할당된 RAM 전체를 사용할 필요는 없습니다.
+`--reuse-prepared`와 토큰 변환 전의 데이터 검증에도 같은 설정을 적용하며,
+`[verify:...]` 로그로 파일 해시와 기록 검증의 진행 상황을 확인할 수 있습니다.
 
 ```bash
-python run_native_600m.py --prepare-only
+python run_native_600m.py --prepare-only --cpu-workers 24
 # GPU를 연결한 뒤 실행합니다.
 python run_native_600m.py --reuse-prepared
 ```
 
-데이터 캐시, JSONL, 토큰 파일, 체크포인트가 모두 영구 저장 공간에 남습니다.
+데이터 캐시, JSONL, 토큰 파일, 체크포인트는 영구 저장 공간에 저장하도록 구성하십시오.
+컨테이너 기반 플랫폼에서는 `--artifacts-dir`와 데이터 캐시 경로를 영구 저장 공간에
+연결하고 해당 플랫폼의 실행 진입점과 실행 시간 제한을 별도로 설정하십시오.
 모델 FP32 가중치 한 벌은 약 2.39GB이고 AdamW 재개 체크포인트는 그보다 큽니다.
 사전학습·대화 학습의 best/last, 임시 원자적 저장본, 데이터와 공개 소스 캐시까지
 고려하여 **여유 공간 100GB 이상을 준비하고 실제 사용량을 확인**하십시오.
@@ -110,7 +119,7 @@ BF16/FP16이나 배치 등이 달라지면 새로운 결과 디렉터리를 사�
 python run_native_600m.py --reuse-prepared
 ```
 
-데이터 준비 후 **Studio GPU에서만** 2 step 실행을 확인할 수 있습니다.
+데이터 준비 후 **단일 CUDA GPU 환경에서** 2 step 실행을 확인할 수 있습니다.
 짧은 실행의 학습 결과는 대화 품질 평가로 사용하지 마십시오.
 
 ```bash
@@ -148,9 +157,9 @@ ODC-By-1.0 및 Common Crawl 이용 조건을 기록합니다. 대화 학습은
 
 ```bash
 python run_native_600m.py --config configs/my_native_600m.json \
-  --local-pretrain-jsonl /teamspace/studios/this_studio/text.jsonl \
+  --local-pretrain-jsonl /data/text.jsonl \
   --pretrain-license '자체 작성, 학습 및 배포 허용' \
-  --local-chat-jsonl /teamspace/studios/this_studio/chat.jsonl \
+  --local-chat-jsonl /data/chat.jsonl \
   --chat-license '자체 작성, 학습 및 배포 허용' \
   --artifacts-dir artifacts_native_600m_custom
 ```

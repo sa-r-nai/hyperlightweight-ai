@@ -1,0 +1,2 @@
+# Local Modal launcher; model dependencies are installed in the remote image.
+modal==1.6.3
