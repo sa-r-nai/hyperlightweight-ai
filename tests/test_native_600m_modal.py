@@ -43,6 +43,7 @@ class ModalWorkflowTests(unittest.TestCase):
                          ["native_600m.train", "native_600m.train", "native_600m.export", "native_600m.evaluate"])
         pretrain, sft = [train.parse_args(command[3:]) for command in commands[:2]]
         self.assertEqual((pretrain.stage, sft.stage), ("pretrain", "sft"))
+        self.assertEqual((pretrain.gpu_profile, sft.gpu_profile), ("rtx-pro-6000", "rtx-pro-6000"))
         self.assertEqual(sft.init_from, pretrain.output_dir / "best.pt")
         self.assertEqual(export.parse_args(commands[2][3:]).checkpoint, sft.output_dir / "best.pt")
         self.assertEqual(evaluate.parse_args(commands[3][3:]).checkpoint, sft.output_dir / "best.pt")

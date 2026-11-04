@@ -21,7 +21,7 @@ def parse_args(argv=None):
     parser.add_argument("--prepare-only", action="store_true", help="Prepare data, tokenizer and tokens on CPU")
     parser.add_argument("--prepare-workers", "--cpu-workers", dest="prepare_workers", type=int,
                         default=DEFAULT_CPU_WORKERS, help="CPU workers for preparation, tokenization, and validation")
-    parser.add_argument("--gpu-profile", choices=("auto", "balanced", "h200"), default="auto")
+    parser.add_argument("--gpu-profile", choices=("auto", "balanced", "h200", "rtx-pro-6000"), default="auto")
     parser.add_argument("--plan", action="store_true", help="Print commands without downloading or training")
     parser.add_argument("--local-pretrain-jsonl", type=Path)
     parser.add_argument("--local-chat-jsonl", type=Path)

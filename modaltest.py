@@ -1,4 +1,4 @@
-"""Prepare on CPU and train NativeKoreanLM-600M on a Modal A100-80GB."""
+"""Prepare on CPU and train NativeKoreanLM-600M on one Modal RTX PRO 6000."""
 
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ volume = modal.Volume.from_name("native-korean-600m", create_if_missing=True)
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install("libgomp1")
+    # Blackwell requires a CUDA-enabled PyTorch build with SM 12.0 support.
+    .pip_install("torch==2.8.0+cu128", index_url="https://download.pytorch.org/whl/cu128")
     .pip_install_from_requirements(str(LOCAL_ROOT / "requirements-native-600m.txt"))
     .env({"PYTHONUNBUFFERED": "1", "PYTHONPATH": REMOTE_ROOT, "HF_HOME": f"{VOLUME_ROOT}/huggingface",
           "RAYON_NUM_THREADS": "24", "TOKENIZERS_PARALLELISM": "true",
@@ -33,7 +35,7 @@ image = (
 def _workflow_commands(artifacts_dir: Path) -> list[list[str]]:
     from run_native_600m import build_commands, parse_args
 
-    args = parse_args(["--artifacts-dir", str(artifacts_dir), "--gpu-profile", "balanced", "--cpu-workers", "24"])
+    args = parse_args(["--artifacts-dir", str(artifacts_dir), "--gpu-profile", "rtx-pro-6000", "--cpu-workers", "24"])
     return build_commands(args)
 
 
@@ -91,7 +93,7 @@ def prepare_data() -> None:
 
 @app.function(
     image=image,
-    gpu="A100-80GB",
+    gpu="RTX-PRO-6000",
     cpu=24,
     memory=65536,
     volumes={VOLUME_ROOT: volume},

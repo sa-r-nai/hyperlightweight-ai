@@ -105,7 +105,61 @@ class PreparationExitTests(unittest.TestCase):
         for command, parser in zip(commands[:3], (prepare.parse_args, tokenizer.parse_args, tokenize.parse_args)):
             self.assertEqual(parser(command[3:]).workers, 24)
         for command in commands[3:5]:
-            self.assertEqual(train.parse_args(command[3:]).cpu_workers, 24)
+            args = train.parse_args(command[3:])
+            self.assertEqual(args.cpu_workers, 24)
+            self.assertEqual(args.gpu_profile, "rtx-pro-6000")
+
+    def test_modal_requests_one_rtx_pro_6000_and_a_blackwell_pytorch_build(self):
+        source = ast.parse((ROOT / "modaltest.py").read_text(encoding="utf-8"))
+        resources = {}
+        for node in source.body:
+            if isinstance(node, ast.FunctionDef):
+                for decorator in node.decorator_list:
+                    if (isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Attribute)
+                            and decorator.func.attr == "function"):
+                        resources[node.name] = {keyword.arg: ast.literal_eval(keyword.value)
+                                                for keyword in decorator.keywords
+                                                if keyword.arg in ("gpu", "cpu", "memory", "max_containers")}
+        self.assertNotIn("gpu", resources["prepare_data"])
+        self.assertEqual(resources["train"], {"gpu": "RTX-PRO-6000", "cpu": 24,
+                                              "memory": 65536, "max_containers": 1})
+        image = next(node.value for node in source.body if isinstance(node, ast.Assign)
+                     and any(isinstance(target, ast.Name) and target.id == "image" for target in node.targets))
+        calls = []
+        while isinstance(image, ast.Call) and isinstance(image.func, ast.Attribute):
+            calls.append(image)
+            image = image.func.value
+        calls.reverse()
+        torch_install = next(call for call in calls if call.func.attr == "pip_install")
+        self.assertEqual([ast.literal_eval(arg) for arg in torch_install.args], ["torch==2.8.0+cu128"])
+        self.assertEqual({kw.arg: ast.literal_eval(kw.value) for kw in torch_install.keywords},
+                         {"index_url": "https://download.pytorch.org/whl/cu128"})
+        requirements = next(call for call in calls if call.func.attr == "pip_install_from_requirements")
+        self.assertLess(calls.index(torch_install), calls.index(requirements))
+
+    def test_modal_reuses_prepared_data_and_keeps_smoke_checkpoints_separate_without_sdk(self):
+        from native_600m.train import parse_args as train_args
+
+        source = ast.parse((ROOT / "modaltest.py").read_text(encoding="utf-8"))
+        helpers = [node for node in source.body if isinstance(node, ast.FunctionDef)
+                   and node.name in ("_workflow_commands", "_preparation_commands", "_training_commands")]
+        namespace = {"Path": Path}
+        exec(compile(ast.Module(body=helpers, type_ignores=[]), "modaltest.py", "exec"), namespace)
+        artifacts = self.root / "artifacts"
+        for relative in ("data/manifest.json", "tokenizer/tokenizer.json", "tokens/manifest.json"):
+            marker = artifacts / relative
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text("{}", encoding="utf-8")
+        self.assertTrue(all("--reuse-prepared" in command
+                            for command in namespace["_preparation_commands"](artifacts)))
+        commands = namespace["_training_commands"](artifacts)
+        self.assertEqual([command[2] for command in commands],
+                         ["native_600m.train", "native_600m.train", "native_600m.export", "native_600m.evaluate"])
+        pretrain, sft = [train_args(command[3:]) for command in commands[:2]]
+        self.assertEqual(sft.init_from, pretrain.output_dir / "best.pt")
+        smoke = train_args(namespace["_training_commands"](artifacts, smoke=True)[0][3:])
+        self.assertEqual(smoke.output_dir, artifacts.with_name("artifacts_smoke") / "pretrain")
+        self.assertEqual((smoke.max_steps, smoke.seq_len, smoke.batch_size, smoke.grad_accumulation), (2, 128, 1, 1))
 
     def test_missing_manifest_does_not_trigger_verification(self):
         failure = subprocess.CalledProcessError(-signal.SIGABRT, self.command)

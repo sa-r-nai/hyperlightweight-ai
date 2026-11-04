@@ -16,7 +16,7 @@ from native_600m.checkpoint import load_model, read_checkpoint, save_checkpoint
 from native_600m.config import load_config, sha256_file
 from native_600m.model import ModelConfig, NativeLM
 from native_600m.runtime import require_cuda
-from native_600m.train import learning_rate, stage_options
+from native_600m.train import checkpoint_activations, learning_rate, resolve_run_identity, stage_options
 from native_600m.training_data import TokenWindows, sample_index
 from run_native_600m import build_commands, parse_args
 
@@ -97,6 +97,97 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(stage_options(config, args, gpu_name="NVIDIA H200 MIG", gpu_memory_gb=18), balanced)
         args.batch_size = 2
         self.assertEqual(stage_options(config, args, gpu_name="NVIDIA H200", gpu_memory_gb=141)["batch_size"], 2)
+
+    def test_rtx_pro_6000_profile_preserves_both_stage_budgets(self):
+        from native_600m.train import parse_args as train_args
+
+        config = load_config()
+        for stage in ("pretrain", "sft"):
+            args = train_args(["--stage", stage, "--output-dir", "unused"])
+            with self.subTest(stage=stage):
+                actual = stage_options(config, args, gpu_name="NVIDIA RTX PRO 6000 Blackwell Server Edition",
+                                       gpu_memory_gb=96)
+                self.assertEqual(actual["batch_size"], 8)
+                self.assertEqual(actual["batch_size"] * actual["grad_accumulation"],
+                                 config[stage]["batch_size"] * config[stage]["grad_accumulation"])
+                self.assertEqual(stage_options(config, args, gpu_name="NVIDIA RTX PRO 6000 MIG", gpu_memory_gb=24),
+                                 config[stage])
+                args.gpu_profile = "balanced"
+                self.assertEqual(stage_options(config, args, gpu_name="NVIDIA RTX PRO 6000", gpu_memory_gb=96),
+                                 config[stage])
+                args.gpu_profile = "rtx-pro-6000"
+                self.assertEqual(stage_options(config, args), actual)
+                args.batch_size = 4
+                args.grad_accumulation = 16 if stage == "pretrain" else 8
+                overridden = stage_options(config, args)
+                self.assertEqual(overridden["batch_size"], 4)
+                self.assertEqual(overridden["grad_accumulation"], args.grad_accumulation)
+
+    def test_gpu_upgrade_keeps_requested_batch_and_accepts_existing_run_identity(self):
+        from native_600m.train import parse_args as train_args
+
+        config = load_config()
+        for stage in ("pretrain", "sft"):
+            for profile in ("auto", "rtx-pro-6000"):
+                args = train_args(["--stage", stage, "--output-dir", "unused", "--gpu-profile", profile])
+                requested = stage_options(config, args, gpu_name="NVIDIA RTX PRO 6000", gpu_memory_gb=96)
+                saved = dict(config[stage])
+                with self.subTest(stage=stage, profile=profile):
+                    previous_identity = {"options": saved, "stage": stage, "max_steps": 100}
+                    actual = resolve_run_identity({**previous_identity, "options": requested}, previous_identity)
+                    self.assertEqual(actual, previous_identity)
+                    self.assertEqual(requested["batch_size"], 8)
+                    self.assertEqual(saved["batch_size"], 1)
+
+    def test_gpu_upgrade_rejects_learning_data_and_effective_batch_changes(self):
+        from copy import deepcopy
+        from native_600m.train import parse_args as train_args
+
+        config = load_config()
+        args = train_args(["--stage", "pretrain", "--output-dir", "unused", "--gpu-profile", "rtx-pro-6000"])
+        requested = stage_options(config, args)
+        saved = dict(config["pretrain"])
+        identity = {"options": requested, "config_sha256": "config", "stage": "pretrain",
+                    "precision": "torch.bfloat16", "token_manifest_sha256": "tokens",
+                    "tokenizer_sha256": "tokenizer", "max_steps": 91553, "init_checkpoint_sha256": None}
+        for change in ({"lr": 0.01}, {"seq_len": 128}, {"target_tokens": 10}, {"max_eval_batches": 1},
+                       {"grad_accumulation": 32}, {"batch_size": True}, {"batch_size": 0}):
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, "configuration or data changed"):
+                resolve_run_identity(identity, {**identity, "options": {**saved, **change}})
+        for previous in (None, {}, {"options": None}):
+            with self.assertRaises(ValueError):
+                resolve_run_identity(identity, previous)
+        for name in ("config_sha256", "stage", "precision", "token_manifest_sha256", "tokenizer_sha256",
+                     "max_steps", "init_checkpoint_sha256"):
+            changed = deepcopy(identity)
+            changed[name] = "different"
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                resolve_run_identity(identity, changed)
+        args.batch_size, args.grad_accumulation = 4, 16
+        explicit = stage_options(config, args)
+        self.assertEqual(resolve_run_identity({**identity, "options": explicit}, {**identity, "options": saved}),
+                         {**identity, "options": saved})
+
+    def test_rtx_pro_profile_is_forwarded_to_both_training_stages(self):
+        from native_600m.train import parse_args as train_args
+
+        commands = build_commands(parse_args(["--plan", "--gpu-profile", "rtx-pro-6000"]))
+        for command in commands[3:5]:
+            self.assertEqual(train_args(command[3:]).gpu_profile, "rtx-pro-6000")
+
+    def test_full_rtx_uses_vram_for_activations_and_balanced_retains_recomputation(self):
+        from native_600m.train import parse_args as train_args
+
+        args = train_args(["--stage", "pretrain", "--output-dir", "unused"])
+        for profile in ("auto", "rtx-pro-6000"):
+            args.gpu_profile = profile
+            with self.subTest(profile=profile):
+                self.assertFalse(checkpoint_activations(args, gpu_name="NVIDIA RTX PRO 6000 Blackwell Server Edition",
+                                                        gpu_memory_gb=96))
+                self.assertTrue(checkpoint_activations(args, gpu_name="NVIDIA RTX PRO 6000 MIG", gpu_memory_gb=24))
+                self.assertTrue(checkpoint_activations(args, gpu_name="NVIDIA A100", gpu_memory_gb=80))
+        args.gpu_profile = "balanced"
+        self.assertTrue(checkpoint_activations(args, gpu_name="NVIDIA RTX PRO 6000", gpu_memory_gb=96))
 
     def test_generated_commands_match_all_parsers_without_importing_model_loaders(self):
         from native_600m import evaluate, export, prepare, tokenize, tokenizer, train
