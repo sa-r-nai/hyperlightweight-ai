@@ -189,6 +189,48 @@ class WorkflowTests(unittest.TestCase):
         args.gpu_profile = "balanced"
         self.assertTrue(checkpoint_activations(args, gpu_name="NVIDIA RTX PRO 6000", gpu_memory_gb=96))
 
+    def test_full_h100_retains_activations_but_smaller_partitions_recompute(self):
+        from native_600m.train import parse_args as train_args
+
+        args = train_args(["--stage", "pretrain", "--output-dir", "unused"])
+        for profile in ("auto", "h100"):
+            args.gpu_profile = profile
+            with self.subTest(profile=profile):
+                self.assertFalse(checkpoint_activations(args, gpu_name="NVIDIA H100 80GB HBM3",
+                                                        gpu_memory_gb=79))
+                self.assertTrue(checkpoint_activations(args, gpu_name="NVIDIA H100 MIG 3g.40gb",
+                                                       gpu_memory_gb=39))
+                self.assertTrue(checkpoint_activations(args, gpu_name="NVIDIA A100", gpu_memory_gb=80))
+                self.assertTrue(checkpoint_activations(args))
+        args.gpu_profile = "balanced"
+        self.assertTrue(checkpoint_activations(args, gpu_name="NVIDIA H100 80GB HBM3", gpu_memory_gb=79))
+
+    def test_300m_workflow_is_isolated_from_600m_and_h100_auto_keeps_effective_batch(self):
+        from native_600m.config import ROOT
+        from native_600m.train import parse_args as train_args
+
+        args = parse_args([])
+        config = load_config(args.config)
+        self.assertEqual(config["pretrain"]["target_tokens"], 6_000_000_000)
+        self.assertEqual(config["pretrain"]["warmup_steps"], 1000)
+        self.assertEqual(args.artifacts_dir, ROOT / "artifacts_native_300m")
+        commands = build_commands(args)
+        for command in commands[3:5]:
+            options = train_args(command[3:])
+            self.assertEqual(options.config, args.config)
+            self.assertEqual(options.output_dir.parent, args.artifacts_dir)
+            actual = stage_options(config, options, gpu_name="NVIDIA H100 80GB HBM3", gpu_memory_gb=79)
+            self.assertEqual(actual["batch_size"], 8)
+            self.assertEqual(actual["batch_size"] * actual["grad_accumulation"],
+                             64 if options.stage == "pretrain" else 32)
+            self.assertEqual(stage_options(config, options, gpu_name="NVIDIA H100 MIG", gpu_memory_gb=39),
+                             config[options.stage])
+        legacy = parse_args(["--config", str(ROOT / "configs" / "native_600m.json"),
+                             "--artifacts-dir", str(ROOT / "artifacts_native_600m")])
+        legacy_command = build_commands(legacy)[3]
+        self.assertEqual(train_args(legacy_command[3:]).output_dir, legacy.artifacts_dir / "pretrain")
+        self.assertNotEqual(args.artifacts_dir, legacy.artifacts_dir)
+
     def test_generated_commands_match_all_parsers_without_importing_model_loaders(self):
         from native_600m import evaluate, export, prepare, tokenize, tokenizer, train
 
@@ -201,6 +243,9 @@ class WorkflowTests(unittest.TestCase):
         for command in commands:
             parsers[command[2]](command[3:])
             self.assertNotIn("Qwen", " ".join(command))
+        compiled = build_commands(parse_args(["--plan", "--compile-model"]))
+        self.assertTrue(all(train.parse_args(command[3:]).compile_model for command in compiled[3:5]))
+        self.assertTrue(all("--compile-model" not in command for command in compiled[:3] + compiled[5:]))
 
     def test_preparation_worker_setting_is_forwarded_and_validated(self):
         from native_600m.prepare import parse_args as prepare_args

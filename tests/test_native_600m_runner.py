@@ -87,6 +87,7 @@ class PreparationExitTests(unittest.TestCase):
 
     def test_modal_cpu_and_pipeline_budgets_are_twenty_four_without_loading_modal(self):
         from native_600m import prepare, tokenize, tokenizer, train
+        from native_600m.config import load_config
 
         source = ast.parse((ROOT / "modaltest.py").read_text(encoding="utf-8"))
         cpu_budgets = []
@@ -107,9 +108,14 @@ class PreparationExitTests(unittest.TestCase):
         for command in commands[3:5]:
             args = train.parse_args(command[3:])
             self.assertEqual(args.cpu_workers, 24)
-            self.assertEqual(args.gpu_profile, "rtx-pro-6000")
+            self.assertEqual(args.gpu_profile, "h100")
+            options = train.stage_options(load_config(args.config), args)
+            self.assertEqual(options["batch_size"], 8)
+            self.assertEqual(options["grad_accumulation"], 8 if args.stage == "pretrain" else 4)
+            self.assertFalse(train.checkpoint_activations(args, gpu_name="NVIDIA H100 80GB HBM3",
+                                                          gpu_memory_gb=79))
 
-    def test_modal_requests_one_rtx_pro_6000_and_a_blackwell_pytorch_build(self):
+    def test_modal_requests_one_h100_sxm5_and_a_cuda_pytorch_build(self):
         source = ast.parse((ROOT / "modaltest.py").read_text(encoding="utf-8"))
         resources = {}
         for node in source.body:
@@ -121,7 +127,7 @@ class PreparationExitTests(unittest.TestCase):
                                                 for keyword in decorator.keywords
                                                 if keyword.arg in ("gpu", "cpu", "memory", "max_containers")}
         self.assertNotIn("gpu", resources["prepare_data"])
-        self.assertEqual(resources["train"], {"gpu": "RTX-PRO-6000", "cpu": 24,
+        self.assertEqual(resources["train"], {"gpu": "H100!", "cpu": 24,
                                               "memory": 65536, "max_containers": 1})
         image = next(node.value for node in source.body if isinstance(node, ast.Assign)
                      and any(isinstance(target, ast.Name) and target.id == "image" for target in node.targets))

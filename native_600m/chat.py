@@ -48,8 +48,8 @@ def generate_reply(model, tokenizer: NativeTokenizer, messages: Sequence[Mapping
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Chat with a trained, independent native Korean 600M model.")
-    parser.add_argument("--checkpoint", default="artifacts_native_600m/sft/best.pt")
+    parser = argparse.ArgumentParser(description="Chat with a trained, independent native Korean model.")
+    parser.add_argument("--checkpoint", default="artifacts_native_300m/sft/best.pt")
     parser.add_argument("--tokenizer", default=DEFAULT_TOKENIZER)
     parser.add_argument("--config", help="Native workflow configuration JSON.")
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")

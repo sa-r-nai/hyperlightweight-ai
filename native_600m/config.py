@@ -5,12 +5,21 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import time
 
 ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_CONFIG = ROOT / "configs" / "native_600m.json"
+DEFAULT_CONFIG = ROOT / "configs" / "native_300m.json"
 DEFAULT_CPU_WORKERS = 24
+
+
+def configure_cpu_worker() -> None:
+    """Keep native library pools within a single CPU data worker."""
+    for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS",
+                 "RAYON_NUM_THREADS"):
+        os.environ[name] = "1"
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 def config_fingerprint(config: dict) -> str:

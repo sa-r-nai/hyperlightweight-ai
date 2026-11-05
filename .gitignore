@@ -1,5 +1,6 @@
 # Native Korean model artifacts and local verification dependencies.
 artifacts_native_600m*/
+artifacts_native_300m*/
 __pycache__/
 *.py[cod]
 .venv-verify/

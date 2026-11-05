@@ -16,11 +16,11 @@ import sys
 import time
 from typing import Mapping
 
-from .config import DEFAULT_CPU_WORKERS, config_fingerprint, load_config, sha256_file, write_json
+from .config import DEFAULT_CPU_WORKERS, configure_cpu_worker, config_fingerprint, load_config, sha256_file, write_json
 from .prepare import _batches, _ordered_batches, _prepared_file_digest, public_source, validate_prepared
 
 MANIFEST_FORMAT = "native-600m-tokens-v1"
-DEFAULT_OUTPUT_DIR = Path("artifacts_native_600m/tokens")
+DEFAULT_OUTPUT_DIR = Path("artifacts_native_300m/tokens")
 SPLITS = ("pretrain_train", "pretrain_validation", "chat_train", "chat_validation")
 _WORKER_TOKENIZER = None
 
@@ -37,7 +37,8 @@ class EncodedBatch:
 def _init_tokenization_worker(tokenizer) -> None:
     from .tokenizer import configure_tokenizer_threads
 
-    # One Rust thread per process avoids nested worker pools.
+    # One native thread per process avoids nested worker pools.
+    configure_cpu_worker()
     configure_tokenizer_threads(1)
     global _WORKER_TOKENIZER
     _WORKER_TOKENIZER = tokenizer
@@ -289,7 +290,8 @@ def validate_tokenized(output_dir: Path, config: dict, *, data_dir: Path | None 
             print(f"[verify:tokens:{name}] OK", flush=True)
     else:
         with ProcessPoolExecutor(max_workers=min(workers, len(SPLITS)),
-                                 mp_context=multiprocessing.get_context("spawn")) as pool:
+                                 mp_context=multiprocessing.get_context("spawn"),
+                                 initializer=configure_cpu_worker) as pool:
             checks = {pool.submit(_verify_token_files, output_dir, name, outputs[name]): name for name in SPLITS}
             for future in as_completed(checks):
                 future.result()
@@ -300,8 +302,8 @@ def validate_tokenized(output_dir: Path, config: dict, *, data_dir: Path | None 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Encode independent Korean model data.")
     parser.add_argument("--config", type=Path)
-    parser.add_argument("--data-dir", type=Path, default=Path("artifacts_native_600m/data"))
-    parser.add_argument("--tokenizer", type=Path, default=Path("artifacts_native_600m/tokenizer/tokenizer.json"))
+    parser.add_argument("--data-dir", type=Path, default=Path("artifacts_native_300m/data"))
+    parser.add_argument("--tokenizer", type=Path, default=Path("artifacts_native_300m/tokenizer/tokenizer.json"))
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--workers", type=int, default=DEFAULT_CPU_WORKERS,
                         help="CPU processes for data validation, tokenization, and token-file validation")

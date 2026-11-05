@@ -1,4 +1,4 @@
-"""Prepare on CPU and train NativeKoreanLM-600M on one Modal RTX PRO 6000."""
+"""Prepare on CPU and train NativeKoreanLM-300M on one Modal NVIDIA H100 SXM5."""
 
 from __future__ import annotations
 
@@ -11,20 +11,23 @@ import modal
 LOCAL_ROOT = Path(__file__).resolve().parent
 REMOTE_ROOT = "/workspace"
 VOLUME_ROOT = "/training"
-ARTIFACTS_DIR = Path(VOLUME_ROOT) / "artifacts_native_600m"
+ARTIFACTS_DIR = Path(VOLUME_ROOT) / "artifacts_native_300m"
 TIMEOUT_SECONDS = 60 * 60
 
 app = modal.App("native-korean-600m")
 volume = modal.Volume.from_name("native-korean-600m", create_if_missing=True)
 image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("libgomp1")
-    # Blackwell requires a CUDA-enabled PyTorch build with SM 12.0 support.
+    .apt_install("libgomp1", "build-essential")
+    # Use a CUDA-enabled PyTorch build compatible with Hopper GPUs.
     .pip_install("torch==2.8.0+cu128", index_url="https://download.pytorch.org/whl/cu128")
     .pip_install_from_requirements(str(LOCAL_ROOT / "requirements-native-600m.txt"))
     .env({"PYTHONUNBUFFERED": "1", "PYTHONPATH": REMOTE_ROOT, "HF_HOME": f"{VOLUME_ROOT}/huggingface",
           "RAYON_NUM_THREADS": "24", "TOKENIZERS_PARALLELISM": "true",
-          "OMP_NUM_THREADS": "24", "MKL_NUM_THREADS": "24"})
+          "OMP_NUM_THREADS": "24", "MKL_NUM_THREADS": "24",
+          "TORCHINDUCTOR_CACHE_DIR": f"{VOLUME_ROOT}/torchinductor",
+          "TORCHINDUCTOR_FX_GRAPH_CACHE": "1", "TORCHINDUCTOR_AUTOGRAD_CACHE": "1",
+          "TRITON_CACHE_DIR": f"{VOLUME_ROOT}/triton"})
     .workdir(REMOTE_ROOT)
     .add_local_dir(LOCAL_ROOT / "native_600m", f"{REMOTE_ROOT}/native_600m", ignore=["__pycache__", "*.pyc"])
     .add_local_dir(LOCAL_ROOT / "configs", f"{REMOTE_ROOT}/configs")
@@ -35,7 +38,7 @@ image = (
 def _workflow_commands(artifacts_dir: Path) -> list[list[str]]:
     from run_native_600m import build_commands, parse_args
 
-    args = parse_args(["--artifacts-dir", str(artifacts_dir), "--gpu-profile", "rtx-pro-6000", "--cpu-workers", "24"])
+    args = parse_args(["--artifacts-dir", str(artifacts_dir), "--gpu-profile", "h100", "--cpu-workers", "24"])
     return build_commands(args)
 
 
@@ -53,8 +56,14 @@ def _preparation_commands(artifacts_dir: Path) -> list[list[str]]:
     return commands
 
 
-def _training_commands(artifacts_dir: Path, *, smoke: bool = False) -> list[list[str]]:
+def _training_commands(artifacts_dir: Path, *, smoke: bool = False, micro_batch_size: int = 16,
+                       compile_model: bool = False) -> list[list[str]]:
+    if type(micro_batch_size) is not int or micro_batch_size not in (1, 2, 4, 8, 16, 32):
+        raise ValueError("--micro-batch-size must be one of 1, 2, 4, 8, 16, or 32.")
     commands = _workflow_commands(artifacts_dir)[3:]
+    if compile_model:
+        for command in commands[:2]:
+            command.append("--compile-model")
     if smoke:
         command = commands[0]
         command[command.index("--output-dir") + 1] = str(
@@ -62,6 +71,10 @@ def _training_commands(artifacts_dir: Path, *, smoke: bool = False) -> list[list
         )
         command.extend(["--seq-len", "128", "--batch-size", "1", "--grad-accumulation", "1", "--max-steps", "2"])
         return [command]
+    # Preserve the existing effective batches and optimizer/sample schedule.
+    for command, effective_batch in zip(commands[:2], (64, 32)):
+        command.extend(["--batch-size", str(micro_batch_size),
+                        "--grad-accumulation", str(effective_batch // micro_batch_size)])
     return commands
 
 
@@ -93,26 +106,31 @@ def prepare_data() -> None:
 
 @app.function(
     image=image,
-    gpu="RTX-PRO-6000",
+    # Require H100 SXM5 instead of allowing automatic upgrades to H200.
+    gpu="H100!",
     cpu=24,
     memory=65536,
     volumes={VOLUME_ROOT: volume},
     timeout=TIMEOUT_SECONDS,
     max_containers=1,
 )
-def train(smoke: bool = False) -> None:
+def train(smoke: bool = False, micro_batch_size: int = 16, compile_model: bool = False) -> None:
     """Run pretraining, SFT, export, and evaluation once, without automatic retries."""
     volume.reload()
-    for command in _training_commands(ARTIFACTS_DIR, smoke=smoke):
+    for command in _training_commands(ARTIFACTS_DIR, smoke=smoke, micro_batch_size=micro_batch_size,
+                                      compile_model=compile_model):
         _run_command(command)
     print(f"[complete] Artifacts: {ARTIFACTS_DIR}{'_smoke' if smoke else ''}", flush=True)
 
 
 @app.local_entrypoint()
-def main(prepare_only: bool = False, smoke: bool = False) -> None:
+def main(prepare_only: bool = False, smoke: bool = False, micro_batch_size: int = 16,
+         compile_model: bool = False) -> None:
     """Prepare data, then launch training; --smoke runs only two GPU steps."""
     if prepare_only and smoke:
         raise ValueError("Use either --prepare-only or --smoke.")
+    # Validate before launching any paid CPU/GPU work.
+    _training_commands(ARTIFACTS_DIR, smoke=smoke, micro_batch_size=micro_batch_size, compile_model=compile_model)
     prepare_data.remote()
     if not prepare_only:
-        train.remote(smoke=smoke)
+        train.remote(smoke=smoke, micro_batch_size=micro_batch_size, compile_model=compile_model)

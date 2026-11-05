@@ -22,14 +22,14 @@ import time
 from typing import Iterable, Iterator, Mapping
 import unicodedata
 
-from .config import DEFAULT_CPU_WORKERS, config_fingerprint, load_config, sha256_file, write_json
+from .config import DEFAULT_CPU_WORKERS, configure_cpu_worker, config_fingerprint, load_config, sha256_file, write_json
 
 PRETRAIN_DATASET_ID = "HuggingFaceFW/fineweb-2"
 PRETRAIN_DATASET_REVISION = "af9c13333eb981300149d5ca60a8e9d659b276b9"
 CHAT_DATASET_ID = "lemon-mint/smol-koreantalk"
 CHAT_DATASET_REVISION = "04eb12c1f999578d74dd87720bc853cedb7fa156"
 MANIFEST_FORMAT = "native-600m-data-v1"
-DEFAULT_OUTPUT_DIR = Path("artifacts_native_600m/data")
+DEFAULT_OUTPUT_DIR = Path("artifacts_native_300m/data")
 SHUFFLE_BUFFER_SIZE = 10_000
 TEMPLATE_MARKERS = (
     "<|", "|>", "[INST]", "[/INST]", "<<SYS>>", "<</SYS>>",
@@ -170,8 +170,12 @@ def local_source(path: Path, license_name: str | None) -> dict:
             "revision": sha256_file(path), "license": license_name.strip(), "url": None}
 
 
-def iter_source(source: Mapping) -> Iterator[object]:
+def iter_source(source: Mapping, *, workers: int = 1, reading_info: dict | None = None) -> Iterator[object]:
+    if type(workers) is not int or workers < 1:
+        raise ValueError("workers must be a positive integer.")
     if source["kind"] == "local-jsonl":
+        if reading_info is not None:
+            reading_info.update(method="local-jsonl-serial-v1", requested_workers=workers, active_workers=1)
         with Path(source["path"]).open("r", encoding="utf-8") as handle:
             for line in handle:
                 if line.strip():
@@ -180,14 +184,9 @@ def iter_source(source: Mapping) -> Iterator[object]:
                     except json.JSONDecodeError:
                         yield None
         return
-    try:
-        from datasets import load_dataset
-    except ImportError as error:
-        raise RuntimeError("Install requirements-native-600m.txt before downloading datasets.") from error
-    kwargs = {"revision": source["revision"], "split": source["split"], "streaming": True}
-    if "config" in source:
-        kwargs["name"] = source["config"]
-    yield from load_dataset(source["id"], **kwargs)
+    from .source import iter_huggingface_source
+
+    yield from iter_huggingface_source(source, workers=workers, reading_info=reading_info)
 
 
 def quotas_for(config: Mapping, stage: str) -> dict[str, int]:
@@ -256,7 +255,8 @@ def _normalized_records(records: Iterable[object], config: dict, stage: str, wor
         return
     # Bound both input prefetch and completed results; Executor.map on Python
     # 3.11 would eagerly consume an entire streaming corpus.
-    with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn")) as pool:
+    with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
+                             initializer=configure_cpu_worker) as pool:
         results = _ordered_batches(pool, _normalize_batch, _batches(records), workers, config, stage)
         try:
             for batch in results:
@@ -314,15 +314,22 @@ def _prepare_stage(records: Iterable[object], output_dir: Path, config: dict, st
                       "rejected_records": sum(rejected.values()), "rejections": dict(rejected)}
         return outputs, statistics
     finally:
-        normalized_records.close()
-        for path in temporaries.values():
-            path.unlink(missing_ok=True)
+        try:
+            normalized_records.close()
+        finally:
+            try:
+                close_source = getattr(records, "close", None)
+                if close_source is not None:
+                    close_source()
+            finally:
+                for path in temporaries.values():
+                    path.unlink(missing_ok=True)
 
 
 def prepare_records(pretrain_records: Iterable[object], chat_records: Iterable[object], output_dir: Path,
                     config: dict, *, sources: dict, max_pretrain_scanned: int = 20_000_000,
                     max_chat_scanned: int = 2_000_000, shuffle_buffer_size: int = SHUFFLE_BUFFER_SIZE,
-                    workers: int = 1) -> dict:
+                    workers: int = 1, source_reading: dict | None = None) -> dict:
     """Publish a completion manifest only after both exact-size stages succeed."""
     for value in (max_pretrain_scanned, max_chat_scanned, shuffle_buffer_size, workers):
         if type(value) is not int or value <= 0:
@@ -346,6 +353,8 @@ def prepare_records(pretrain_records: Iterable[object], chat_records: Iterable[o
                 "preparation": {"seed": config["seed"], "shuffle_buffer_size": shuffle_buffer_size,
                                 "max_pretrain_scanned": max_pretrain_scanned, "max_chat_scanned": max_chat_scanned,
                                 "split_method": "sha256-normalized-document-or-first-user-prompt-v1"}}
+    if source_reading is not None:
+        manifest["preparation"]["source_reading"] = source_reading
     write_json(manifest_path, manifest)
     return manifest
 
@@ -431,7 +440,8 @@ def validate_prepared(output_dir: Path, config: dict, *, workers: int = 1) -> di
             if future.result() != entry.get("sha256"):
                 raise ValueError(f"Prepared {name} hash mismatch.")
             print(f"[verify:{name}] hash OK", flush=True)
-    executor = (ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"))
+    executor = (ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context("spawn"),
+                                   initializer=configure_cpu_worker)
                 if workers > 1 else nullcontext(None))
     with executor as pool:
         groups = set()
@@ -498,9 +508,12 @@ def main(argv: list[str] | None = None) -> None:
             raise ValueError("Prepared data uses different sources; omit --reuse-prepared.")
         print(f"[prepare] Verified existing data: {args.output_dir}")
         return
-    prepare_records(iter_source(sources["pretrain"]), iter_source(sources["chat"]), args.output_dir, config,
+    reading_info = {stage: {} for stage in sources}
+    prepare_records(iter_source(sources["pretrain"], workers=args.workers, reading_info=reading_info["pretrain"]),
+                    iter_source(sources["chat"], workers=args.workers, reading_info=reading_info["chat"]),
+                    args.output_dir, config,
                     sources=sources, max_pretrain_scanned=args.max_pretrain_scanned,
-                    max_chat_scanned=args.max_chat_scanned, workers=args.workers)
+                    max_chat_scanned=args.max_chat_scanned, workers=args.workers, source_reading=reading_info)
     print(f"[prepare] Wrote both Korean data stages: {args.output_dir}")
 
 

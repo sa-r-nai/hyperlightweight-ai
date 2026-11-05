@@ -20,15 +20,17 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--stage", choices=("pretrain", "sft"), required=True)
-    parser.add_argument("--tokens-dir", type=Path, default=Path("artifacts_native_600m/tokens"))
-    parser.add_argument("--tokenizer", type=Path, default=Path("artifacts_native_600m/tokenizer/tokenizer.json"))
+    parser.add_argument("--tokens-dir", type=Path, default=Path("artifacts_native_300m/tokens"))
+    parser.add_argument("--tokenizer", type=Path, default=Path("artifacts_native_300m/tokenizer/tokenizer.json"))
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--init-from", type=Path, help="Required pretrained native checkpoint for SFT only")
     parser.add_argument("--max-steps", type=int, help="Override budget for a short GPU execution check")
     parser.add_argument("--seq-len", type=int)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--grad-accumulation", type=int)
-    parser.add_argument("--gpu-profile", choices=("auto", "balanced", "h200", "rtx-pro-6000"), default="auto")
+    parser.add_argument("--gpu-profile", choices=("auto", "balanced", "h100", "h200", "rtx-pro-6000"), default="auto")
+    parser.add_argument("--compile-model", action="store_true",
+                        help="Compile model calls with TorchInductor; initial steps may take longer")
     parser.add_argument("--checkpoint-seconds", type=float, default=300,
                         help="Save last.pt at a completed step at least this often, in addition to step-based saves")
     parser.add_argument("--cpu-workers", type=int, default=DEFAULT_CPU_WORKERS,
@@ -46,8 +48,9 @@ def learning_rate(step: int, total: int, peak: float, minimum: float, warmup: in
 
 def stage_options(config, args, *, gpu_name="", gpu_memory_gb=0):
     options = dict(config[args.stage])
-    large_gpu = ("H200" in gpu_name.upper() or "RTX PRO 6000" in gpu_name.upper()) and gpu_memory_gb >= 80
-    if args.gpu_profile in ("h200", "rtx-pro-6000") or (args.gpu_profile == "auto" and large_gpu):
+    large_gpu = (("H100" in gpu_name.upper() and gpu_memory_gb >= 75)
+                 or (("H200" in gpu_name.upper() or "RTX PRO 6000" in gpu_name.upper()) and gpu_memory_gb >= 80))
+    if args.gpu_profile in ("h100", "h200", "rtx-pro-6000") or (args.gpu_profile == "auto" and large_gpu):
         options.update(batch_size=8, grad_accumulation=8 if args.stage == "pretrain" else 4)
     for name in ("seq_len", "batch_size", "grad_accumulation"):
         value = getattr(args, name)
@@ -92,9 +95,13 @@ def checkpoint_due(step, *, start_step, max_steps, interval_steps, elapsed_secon
 
 
 def checkpoint_activations(args, *, gpu_name="", gpu_memory_gb=0):
-    """Use RTX PRO 6000 memory to retain activations instead of recomputing them."""
+    """Retain activations on full H100 and RTX PRO 6000 GPUs for faster training."""
+    # An 80 GB H100 reports slightly less than 80 GiB of usable memory.
+    full_h100 = "H100" in gpu_name.upper() and gpu_memory_gb >= 75
     full_rtx = "RTX PRO 6000" in gpu_name.upper() and gpu_memory_gb >= 80
-    return not (args.gpu_profile in ("auto", "rtx-pro-6000") and full_rtx)
+    retain_h100 = args.gpu_profile in ("auto", "h100") and full_h100
+    retain_rtx = args.gpu_profile in ("auto", "rtx-pro-6000") and full_rtx
+    return not (retain_h100 or retain_rtx)
 
 
 def evaluate(model, dataset, *, batch_size, max_batches, device, dtype, max_windows=None):
@@ -224,11 +231,18 @@ def train(args):
     elif saved_run is not None:
         print("[resume] No last.pt found; starting at step=0. Unsaved progress cannot be restored.", flush=True)
 
+    if args.compile_model:
+        # Compile in place so checkpoints retain their original parameter keys
+        # and the optimizer keeps references to the same parameters.
+        model.compile(backend="inductor", mode="default", dynamic=False)
+        print("[compile] backend=inductor mode=default; first forward/backward builds kernels.", flush=True)
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_json(run_file, {"identity": identity, "model_parameters": parameter_count(model_config),
                           "workflow_config": config,
                           "execution_options": options, "validation_window_budget": validation_window_budget,
                           "checkpoint_seconds": args.checkpoint_seconds,
+                          "compile_model": args.compile_model,
                           "training_windows": len(train_data), "validation_windows": len(validation),
                           "input_tokens_per_step": input_tokens_per_step, "max_steps": max_steps,
                           "planned_corpus_passes": max_steps * examples_per_step / len(train_data),
@@ -238,12 +252,13 @@ def train(args):
           f"corpus_passes={max_steps * examples_per_step / len(train_data):.2f}", flush=True)
     print(f"[train] gpu={gpu_name} vram={gpu_memory_gb:.1f}GiB precision={dtype} "
           f"batch_size={options['batch_size']} grad_accumulation={options['grad_accumulation']} "
-          f"activation_checkpointing={recompute_activations}", flush=True)
+          f"activation_checkpointing={recompute_activations} compile_model={args.compile_model}", flush=True)
     print(f"[checkpoint] first_step=True interval_seconds={args.checkpoint_seconds:g} "
           f"interval_steps={options['checkpoint_every']}", flush=True)
 
     def metadata():
         return {"stage": args.stage, "step": step, "best_loss": best_loss, "run_identity": identity,
+                "compile_model": args.compile_model,
                 "execution_options": options, "validation_window_budget": validation_window_budget,
                 "tokenizer_sha256": tokenizer.fingerprint, "workflow_config": config,
                 "training_provenance": {"workflow_config": config, "identity": identity,
@@ -252,9 +267,13 @@ def train(args):
     started = time.perf_counter()
     last_checkpoint_at = started
     start_step = step
+    train_seconds = 0.0
+    logged_train_seconds = 0.0
+    logged_step = step
     overflow_retries = 0
     model.train()
     while step < max_steps:
+        step_started = time.perf_counter()
         optimizer.zero_grad(set_to_none=True)
         microbatches = [train_data.batch((step * options["grad_accumulation"] + micro) * options["batch_size"],
                                         options["batch_size"], config["seed"])
@@ -292,10 +311,21 @@ def train(args):
         scaler.update()
         overflow_retries = 0
         step += 1
-        if step == start_step + 1 or step % 10 == 0:
+        log_step = step == start_step + 1 or step % 10 == 0
+        if log_step:
+            # Include queued optimizer work in the interval measurement.
+            torch.cuda.synchronize()
+        train_seconds += time.perf_counter() - step_started
+        if log_step:
             tokens_per_second = (step - start_step) * input_tokens_per_step / max(1e-6, time.perf_counter() - started)
+            interval_tokens_per_second = (step - logged_step) * input_tokens_per_step / max(
+                1e-6, train_seconds - logged_train_seconds)
             print(f"[train] step={step}/{max_steps} loss={loss_sum / target_count:.4f} "
-                  f"lr={lr:.3e} tokens/s={tokens_per_second:.0f}", flush=True)
+                  f"lr={lr:.3e} tokens/s={tokens_per_second:.0f} "
+                  f"train_tokens/s={interval_tokens_per_second:.0f} "
+                  f"peak_allocated_gib={torch.cuda.max_memory_allocated() / 1024**3:.2f} "
+                  f"peak_reserved_gib={torch.cuda.max_memory_reserved() / 1024**3:.2f}", flush=True)
+            logged_step, logged_train_seconds = step, train_seconds
         evaluated = best_loss is None or step % options["eval_every"] == 0 or step == max_steps
         if evaluated:
             validation_loss = evaluate(model, validation, batch_size=options["batch_size"],

@@ -158,11 +158,11 @@ def run_evaluation(model, tokenizer, config: dict, max_new_tokens: int = 192) ->
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Evaluate native Korean model conversations with visible sanity heuristics.")
-    parser.add_argument("--checkpoint", type=Path, default=Path("artifacts_native_600m/sft/best.pt"))
+    parser.add_argument("--checkpoint", type=Path, default=Path("artifacts_native_300m/sft/best.pt"))
     parser.add_argument("--tokenizer", type=Path, default=Path(DEFAULT_TOKENIZER))
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--device", choices=("cuda", "cpu"), default="cuda")
-    parser.add_argument("--report", type=Path, default=Path("artifacts_native_600m/evaluation.json"))
+    parser.add_argument("--report", type=Path, default=Path("artifacts_native_300m/evaluation.json"))
     parser.add_argument("--max-new-tokens", type=int, default=192)
     parser.add_argument("--min-pass-rate", type=float, default=0.8)
     parser.add_argument("--allow-fail", action="store_true", help="Save failures without a nonzero exit status.")
@@ -190,7 +190,7 @@ def main(argv: list[str] | None = None) -> None:
     gate_passed = sane and pass_rate >= args.min_pass_rate
     report = {
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
-        "model": config.get("name", "NativeKoreanLM-600M"),
+        "model": config.get("name", "NativeKoreanLM"),
         "pretrained_base": None,
         "parameter_count": parameter_count(checkpoint_config),
         "checkpoint": str(args.checkpoint),

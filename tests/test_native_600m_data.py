@@ -199,6 +199,9 @@ class NativeDataTests(unittest.TestCase):
         self.assertFalse(self.data_dir.exists())
 
     def test_public_sources_stream_without_a_platform_restriction(self):
+        # Load Torch before patch.dict restores its temporary sys.modules map.
+        import native_600m.source
+
         for stage, source in self.sources.items():
             with self.subTest(stage=stage):
                 records = [{"text": "한국어 문서"}] if stage == "pretrain" else example_chats(1)
@@ -209,6 +212,36 @@ class NativeDataTests(unittest.TestCase):
                 if stage == "pretrain":
                     options["name"] = "kor_Hang"
                 load_dataset.assert_called_once_with(source["id"], **options)
+
+    def test_source_readers_close_after_quotas_and_record_the_reading_policy(self):
+        closed = []
+
+        def records(stage, values):
+            try:
+                yield from values
+            finally:
+                closed.append(stage)
+
+        reading = {stage: {"method": "test-reader-v1", "active_workers": 2} for stage in self.sources}
+        manifest = prepare_records(records("pretrain", example_documents()), records("chat", example_chats()),
+                                   self.data_dir, self.config, sources=self.sources, shuffle_buffer_size=5,
+                                   source_reading=reading)
+        self.assertCountEqual(closed, ["pretrain", "chat"])
+        self.assertEqual(manifest["preparation"]["source_reading"], reading)
+        self.assertEqual(validate_prepared(self.data_dir, self.config), manifest)
+
+    def test_cli_forwards_cpu_budget_to_stream_readers(self):
+        from native_600m.prepare import main
+
+        with patch("native_600m.prepare.load_config", return_value=self.config), \
+             patch("native_600m.prepare.iter_source", side_effect=[iter(()), iter(())]) as source, \
+             patch("native_600m.prepare.prepare_records") as prepare:
+            main(["--workers", "24", "--output-dir", str(self.data_dir)])
+        self.assertEqual(source.call_count, 2)
+        for call in source.call_args_list:
+            self.assertEqual(call.kwargs["workers"], 24)
+        self.assertEqual(prepare.call_args.kwargs["workers"], 24)
+        self.assertEqual(set(prepare.call_args.kwargs["source_reading"]), {"pretrain", "chat"})
 
     def test_korean_normalization_and_quality_filters(self):
         text = "  한국어\t 문서를\r\n 함께   천천히 읽어 봅니다.  "

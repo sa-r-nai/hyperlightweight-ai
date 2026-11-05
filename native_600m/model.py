@@ -1,6 +1,6 @@
 """Independent decoder-only language model with randomly initialized weights.
 
-The default configuration contains exactly 596,788,480 unique parameters.
+The default configuration contains exactly 303,350,784 unique parameters.
 This module uses PyTorch building blocks only; it does not load another model's
 configuration, tokenizer, or weights. Labels supplied to ``forward`` must
 already be aligned with their next-token prediction positions.
@@ -25,11 +25,11 @@ class ModelConfig:
 
     vocab_size: int = 32_000
     max_seq_len: int = 2_048
-    d_model: int = 1_280
-    n_layers: int = 32
-    n_heads: int = 20
-    n_kv_heads: int = 5
-    d_ff: int = 3_456
+    d_model: int = 1_024
+    n_layers: int = 24
+    n_heads: int = 16
+    n_kv_heads: int = 4
+    d_ff: int = 2_816
     dropout: float = 0.0
     rope_theta: float = 10_000.0
     norm_eps: float = 1e-5

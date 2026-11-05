@@ -62,9 +62,9 @@ def export_model(checkpoint: Path, tokenizer_path: Path, output_dir: Path):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, default=Path("artifacts_native_600m/sft/best.pt"))
-    parser.add_argument("--tokenizer", type=Path, default=Path("artifacts_native_600m/tokenizer/tokenizer.json"))
-    parser.add_argument("--output-dir", type=Path, default=Path("artifacts_native_600m/model"))
+    parser.add_argument("--checkpoint", type=Path, default=Path("artifacts_native_300m/sft/best.pt"))
+    parser.add_argument("--tokenizer", type=Path, default=Path("artifacts_native_300m/tokenizer/tokenizer.json"))
+    parser.add_argument("--output-dir", type=Path, default=Path("artifacts_native_300m/model"))
     return parser.parse_args(argv)
 
 

@@ -10,6 +10,7 @@ import torch
 from torch.nn import functional as F
 
 from native_600m.model import ModelConfig, NativeLM, RMSNorm, RotaryEmbedding, parameter_count
+from native_600m.config import ROOT, load_config
 
 
 def tiny_config(**overrides) -> ModelConfig:
@@ -20,12 +21,20 @@ def tiny_config(**overrides) -> ModelConfig:
 class ModelConfigurationTests(unittest.TestCase):
     def test_default_parameter_count_matches_meta_model(self):
         config = ModelConfig()
-        self.assertEqual(parameter_count(config), 596_788_480)
+        self.assertEqual(config, ModelConfig(**load_config()["model"]))
+        self.assertEqual(parameter_count(config), 303_350_784)
         with torch.device("meta"):
             model = NativeLM(config)
         self.assertEqual(sum(parameter.numel() for parameter in model.parameters()), parameter_count(config))
         self.assertTrue(all(parameter.device.type == "meta" for parameter in model.parameters()))
         self.assertIs(model.token_embedding.weight, model.lm_head.weight)
+
+    def test_original_600m_configuration_remains_loadable(self):
+        config = ModelConfig(**load_config(ROOT / "configs" / "native_600m.json")["model"])
+        self.assertEqual(parameter_count(config), 596_788_480)
+        with torch.device("meta"):
+            model = NativeLM(config)
+        self.assertEqual(sum(parameter.numel() for parameter in model.parameters()), 596_788_480)
 
     def test_untied_parameter_count_matches_tiny_model(self):
         config = tiny_config(tie_embeddings=False)

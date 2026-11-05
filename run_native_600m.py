@@ -1,4 +1,4 @@
-"""Workflow for a Korean 600M model with independent random weights."""
+"""Workflow for a Korean 300M model with independent random weights."""
 
 from __future__ import annotations
 
@@ -16,12 +16,13 @@ from native_600m.runtime import require_cuda
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--artifacts-dir", type=Path, default=ROOT / "artifacts_native_600m")
+    parser.add_argument("--artifacts-dir", type=Path, default=ROOT / "artifacts_native_300m")
     parser.add_argument("--reuse-prepared", action="store_true")
     parser.add_argument("--prepare-only", action="store_true", help="Prepare data, tokenizer and tokens on CPU")
     parser.add_argument("--prepare-workers", "--cpu-workers", dest="prepare_workers", type=int,
                         default=DEFAULT_CPU_WORKERS, help="CPU workers for preparation, tokenization, and validation")
-    parser.add_argument("--gpu-profile", choices=("auto", "balanced", "h200", "rtx-pro-6000"), default="auto")
+    parser.add_argument("--gpu-profile", choices=("auto", "balanced", "h100", "h200", "rtx-pro-6000"), default="auto")
+    parser.add_argument("--compile-model", action="store_true", help="Compile training model calls with TorchInductor")
     parser.add_argument("--plan", action="store_true", help="Print commands without downloading or training")
     parser.add_argument("--local-pretrain-jsonl", type=Path)
     parser.add_argument("--local-chat-jsonl", type=Path)
@@ -59,6 +60,8 @@ def build_commands(args):
         return commands
     train_common = [*common, "--tokens-dir", str(tokens), "--tokenizer", str(tokenizer),
                     "--gpu-profile", args.gpu_profile, "--cpu-workers", str(args.prepare_workers)]
+    if args.compile_model:
+        train_common.append("--compile-model")
     commands.extend([
         [sys.executable, "-m", "native_600m.train", *train_common, "--stage", "pretrain",
          "--output-dir", str(root / "pretrain")],

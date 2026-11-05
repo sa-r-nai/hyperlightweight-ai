@@ -102,7 +102,7 @@ class NativeEvaluationTests(unittest.TestCase):
 
     def test_default_command_uses_native_checkpoint_and_explicit_cpu(self):
         args = parse_args([])
-        self.assertEqual(args.checkpoint, Path("artifacts_native_600m/sft/best.pt"))
+        self.assertEqual(args.checkpoint, Path("artifacts_native_300m/sft/best.pt"))
         self.assertEqual(args.max_new_tokens, 192)
         self.assertEqual(args.device, "cuda")
         self.assertEqual(parse_args(["--device", "cpu"]).device, "cpu")

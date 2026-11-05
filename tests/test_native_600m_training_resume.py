@@ -71,12 +71,14 @@ class TrainingResumeTests(unittest.TestCase):
         optimizer.step()
         return torch.cat([x for x, _ in batches]), torch.cat([y for _, y in batches]), count
 
-    def test_actual_optimizer_and_sample_cursor_survive_batch_one_to_eight_resume(self):
+    def test_actual_optimizer_and_sample_cursor_survive_batch_one_to_sixteen_resume(self):
         for stage, effective_batch in (("pretrain", 64), ("sft", 32)):
             with self.subTest(stage=stage):
                 torch.manual_seed(7)
                 dataset = self.dataset(stage)
                 reference = NativeLM(self.model_config)
+                # Resume a recomputing run with activations retained in memory.
+                reference.enable_gradient_checkpointing()
                 old_optimizer = self.optimizer(reference)
                 old_identity = {"stage": stage, "max_steps": 100,
                                 "options": {"batch_size": 1, "grad_accumulation": effective_batch,
@@ -87,11 +89,12 @@ class TrainingResumeTests(unittest.TestCase):
                                 run_identity=old_identity, optimizer=old_optimizer.state_dict(), scaler={},
                                 torch_rng=torch.get_rng_state(), cuda_rng=[], python_rng=random.getstate())
                 saved = read_checkpoint(checkpoint_path)
-                execution = {**old_identity["options"], "batch_size": 8, "grad_accumulation": effective_batch // 8}
+                execution = {**old_identity["options"], "batch_size": 16, "grad_accumulation": effective_batch // 16}
                 identity = resolve_run_identity({**old_identity, "options": execution}, saved["run_identity"])
                 self.assertEqual(identity, old_identity)
                 self.assertEqual(saved["step"], 1)
                 restored = NativeLM(self.model_config)
+                self.assertFalse(restored.gradient_checkpointing)
                 new_optimizer = self.optimizer(restored)
                 restored.load_state_dict(saved["model"])
                 new_optimizer.load_state_dict(saved["optimizer"])
@@ -105,7 +108,7 @@ class TrainingResumeTests(unittest.TestCase):
                 old_inputs, old_targets, old_count = self.update(
                     reference, old_optimizer, dataset, step=saved["step"], batch_size=1, accumulation=effective_batch)
                 new_inputs, new_targets, new_count = self.update(
-                    restored, new_optimizer, dataset, step=saved["step"], batch_size=8, accumulation=effective_batch // 8)
+                    restored, new_optimizer, dataset, step=saved["step"], batch_size=16, accumulation=effective_batch // 16)
                 self.assertTrue(torch.equal(old_inputs, new_inputs))
                 self.assertTrue(torch.equal(old_targets, new_targets))
                 self.assertEqual(old_count, new_count)
@@ -117,7 +120,7 @@ class TrainingResumeTests(unittest.TestCase):
                                 execution_options=execution, optimizer=new_optimizer.state_dict())
                 second = read_checkpoint(checkpoint_path)
                 self.assertEqual(second["step"], 2)
-                self.assertEqual(second["execution_options"]["batch_size"], 8)
+                self.assertEqual(second["execution_options"]["batch_size"], 16)
                 self.assertEqual(resolve_run_identity({**old_identity, "options": execution}, second["run_identity"]),
                                  old_identity)
 
@@ -147,6 +150,34 @@ class TrainingResumeTests(unittest.TestCase):
         self.assertAlmostEqual(original, regrouped, places=5)
         self.assertTrue(model.training)
 
+    def test_compilation_preserves_parameters_gradients_and_checkpoint_keys(self):
+        reference = NativeLM(self.model_config)
+        compiled = NativeLM(self.model_config)
+        compiled.load_state_dict(reference.state_dict())
+        parameters = tuple(compiled.parameters())
+        keys = set(compiled.state_dict())
+        # Exercise real graph capture/autograd on CPU without requiring CUDA,
+        # Triton, or a Windows C++ compiler. CUDA performance is measured remotely.
+        compiled.compile(backend="aot_eager", dynamic=False)
+        self.assertTrue(all(before is after for before, after in zip(parameters, compiled.parameters())))
+        x, y = self.dataset("sft").batch(0, 2, seed=42)
+        expected, reference_loss = reference(x, y, loss_reduction="sum")
+        actual, compiled_loss = compiled(x, y, loss_reduction="sum")
+        torch.testing.assert_close(actual, expected)
+        torch.testing.assert_close(compiled_loss, reference_loss)
+        reference_loss.backward()
+        compiled_loss.backward()
+        for before, after in zip(reference.parameters(), compiled.parameters()):
+            torch.testing.assert_close(before.grad, after.grad)
+        path = self.root / "compiled.pt"
+        save_checkpoint(path, compiled, stage="pretrain", step=1)
+        checkpoint = read_checkpoint(path)
+        self.assertEqual(set(checkpoint["model"]), keys)
+        restored = NativeLM(self.model_config)
+        restored.load_state_dict(checkpoint["model"], strict=True)
+        with torch.inference_mode():
+            torch.testing.assert_close(restored(x)[0], expected)
+
     def test_training_entrypoint_resumes_a_checkpoint_at_batch_eight_and_saves_the_first_new_step(self):
         config = load_config()
         config["model"] = asdict(self.model_config)
@@ -172,7 +203,8 @@ class TrainingResumeTests(unittest.TestCase):
                         cuda_rng=[], python_rng=random.getstate())
         args = parse_args(["--config", str(config_path), "--tokens-dir", str(self.root),
                            "--tokenizer", str(self.root / "manual-tokenizer.json"), "--output-dir", str(output),
-                           "--stage", "pretrain", "--gpu-profile", "rtx-pro-6000", "--max-steps", "3"])
+                           "--stage", "pretrain", "--gpu-profile", "rtx-pro-6000", "--max-steps", "3",
+                           "--compile-model"])
         tensor_to = torch.Tensor.to
         adamw = torch.optim.AdamW
 
@@ -200,6 +232,8 @@ class TrainingResumeTests(unittest.TestCase):
                 patch("torch.cuda.get_device_properties", return_value=SimpleNamespace(total_memory=96 * 1024**3)),
                 patch("torch.cuda.get_device_capability", return_value=(12, 0)),
                 patch("torch.cuda.is_bf16_supported", return_value=True),
+                patch("torch.cuda.synchronize"), patch("torch.cuda.max_memory_allocated", return_value=0),
+                patch("torch.cuda.max_memory_reserved", return_value=0),
                 patch("torch.cuda.manual_seed_all"), patch("torch.cuda.get_rng_state_all", return_value=[]),
                 patch("torch.cuda.set_rng_state_all"), patch("torch.Tensor.to", new=cpu_tensor_to),
                 patch("torch.optim.AdamW", new=cpu_optimizer),
@@ -207,13 +241,17 @@ class TrainingResumeTests(unittest.TestCase):
             ]
             for replacement in replacements:
                 stack.enter_context(replacement)
+            compiler = stack.enter_context(patch.object(NativeLM, "compile", autospec=True))
             saved = stack.enter_context(patch("native_600m.train.save_checkpoint", wraps=save_checkpoint))
             train(args)
+        self.assertEqual(compiler.call_count, 1)
+        self.assertEqual(compiler.call_args.kwargs, {"backend": "inductor", "mode": "default", "dynamic": False})
         last_saves = [call.kwargs["step"] for call in saved.call_args_list if call.args[0].name == "last.pt"]
         self.assertEqual(last_saves, [2, 3])
         last = read_checkpoint(output / "last.pt")
         self.assertEqual(last["step"], 3)
         self.assertEqual(last["run_identity"], identity)
+        self.assertTrue(last["compile_model"])
         self.assertEqual(last["execution_options"]["batch_size"], 8)
         self.assertEqual(last["execution_options"]["grad_accumulation"], 8)
         self.assertEqual(last["validation_window_budget"], 32)

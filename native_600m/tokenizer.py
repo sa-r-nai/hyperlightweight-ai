@@ -20,7 +20,7 @@ SPECIAL_TOKENS = (
     "<|user|>", "<|assistant|>", "<|turn_end|>",
 )
 SPECIAL_TOKEN_IDS = {token: index for index, token in enumerate(SPECIAL_TOKENS)}
-DEFAULT_TOKENIZER = "artifacts_native_600m/tokenizer/tokenizer.json"
+DEFAULT_TOKENIZER = "artifacts_native_300m/tokenizer/tokenizer.json"
 _ROLE_IDS = {"system": 3, "user": 4, "assistant": 5}
 
 

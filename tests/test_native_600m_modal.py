@@ -37,13 +37,18 @@ class ModalWorkflowTests(unittest.TestCase):
 
     def test_gpu_pipeline_contains_training_export_and_evaluation(self):
         from native_600m import evaluate, export, train
+        from native_600m.config import load_config
 
+        self.assertEqual(modaltest.ARTIFACTS_DIR, Path("/training/artifacts_native_300m"))
         commands = modaltest._training_commands(self.artifacts)
         self.assertEqual([command[2] for command in commands],
                          ["native_600m.train", "native_600m.train", "native_600m.export", "native_600m.evaluate"])
         pretrain, sft = [train.parse_args(command[3:]) for command in commands[:2]]
         self.assertEqual((pretrain.stage, sft.stage), ("pretrain", "sft"))
-        self.assertEqual((pretrain.gpu_profile, sft.gpu_profile), ("rtx-pro-6000", "rtx-pro-6000"))
+        self.assertEqual((pretrain.gpu_profile, sft.gpu_profile), ("h100", "h100"))
+        self.assertEqual(load_config(pretrain.config)["name"], "NativeKoreanLM-300M")
+        self.assertEqual((pretrain.batch_size, pretrain.grad_accumulation), (16, 4))
+        self.assertEqual((sft.batch_size, sft.grad_accumulation), (16, 2))
         self.assertEqual(sft.init_from, pretrain.output_dir / "best.pt")
         self.assertEqual(export.parse_args(commands[2][3:]).checkpoint, sft.output_dir / "best.pt")
         self.assertEqual(evaluate.parse_args(commands[3][3:]).checkpoint, sft.output_dir / "best.pt")
@@ -59,6 +64,32 @@ class ModalWorkflowTests(unittest.TestCase):
         self.assertEqual((args.seq_len, args.batch_size, args.grad_accumulation), (128, 1, 1))
         self.assertEqual(args.tokens_dir, self.artifacts / "tokens")
         self.assertNotIn("--max-steps", modaltest._training_commands(self.artifacts)[0])
+
+    def test_batch_override_preserves_effective_batch_and_rejects_invalid_values(self):
+        from native_600m.train import parse_args
+
+        for batch in (8, 16, 32):
+            with self.subTest(batch=batch):
+                commands = modaltest._training_commands(self.artifacts, micro_batch_size=batch)
+                pretrain, sft = [parse_args(command[3:]) for command in commands[:2]]
+                self.assertEqual(pretrain.batch_size * pretrain.grad_accumulation, 64)
+                self.assertEqual(sft.batch_size * sft.grad_accumulation, 32)
+                self.assertEqual(pretrain.batch_size, batch)
+                self.assertEqual(sft.batch_size, batch)
+        for batch in (0, -1, 3, 64, True, 8.0):
+            with self.subTest(batch=batch), self.assertRaisesRegex(ValueError, "micro-batch-size"):
+                modaltest._training_commands(self.artifacts, micro_batch_size=batch)
+
+    def test_compilation_is_opt_in_and_only_forwarded_to_training(self):
+        from native_600m.train import parse_args
+
+        self.assertTrue(all("--compile-model" not in command
+                            for command in modaltest._training_commands(self.artifacts)))
+        commands = modaltest._training_commands(self.artifacts, compile_model=True)
+        self.assertTrue(all(parse_args(command[3:]).compile_model for command in commands[:2]))
+        self.assertTrue(all("--compile-model" not in command for command in commands[2:]))
+        smoke = modaltest._training_commands(self.artifacts, smoke=True, compile_model=True)
+        self.assertTrue(parse_args(smoke[0][3:]).compile_model)
 
     def test_failed_command_commits_saved_results_and_propagates_failure(self):
         command = ["python", "-m", "native_600m.evaluate"]
